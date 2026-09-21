@@ -25,11 +25,11 @@ harness --provider mock        # keyless: echoes prompts, for poking at the UI
 ```
 
 The install command is the whole story: the root of this repo is a virtual
-workspace, so point `cargo install` at `crates/harness-cli` (not `.`). Reinstall
-the same way to update after pulling changes — `harness doctor` always shows
-the running binary's path and whether it is the one on `PATH` — and
-`harness update --models` refreshes the model catalog independently of the
-binary.
+workspace, so point `cargo install` at `crates/harness-cli` (not `.`). After
+that, `harness update` rebuilds and reinstalls from the checkout (remembered
+in `~/.harness/checkout`, so it works from the installed binary too),
+`harness update --models` refreshes the model catalog, and `harness doctor`
+always shows the running binary's path and whether it is the one on `PATH`.
 
 Inside the TUI:
 

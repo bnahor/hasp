@@ -1,6 +1,6 @@
 # P11 — closing the audit gaps, in order
 
-Status: item 1 COMPLETE (2026-09-20); rest in order
+Status: items 1–2 COMPLETE (2026-09-20); 3 onward next
 
 Item 1 verified three ways: unit + fake-endpoint e2e tests (fragmented tool
 deltas, usage, the 400-on-`stream_options` retry), live discovery against
@@ -25,12 +25,15 @@ Three layers:
   stale instead of only via `harness update --models`, and `--model` accepts any
   id the catalog lists for the active provider.
 
-## 2. Self-update
+## 2. Self-update — done
 
-`git init` + an initial commit (the repo has deliberately had no history; a
-self-updater needs something to update *from*), then `harness update` rebuilds
-and reinstalls from the detected checkout, `harness update --models` stays as
-the catalog refresh.
+`git init` + initial commit (427d49c), then `harness update`: rebuilds and
+reinstalls from the checkout it runs in (walking up from the executable, so
+`target/debug` and `target/release` both resolve), remembers that checkout in
+`~/.harness/checkout`, and an installed binary with no checkout beside it
+updates from the remembered path. `harness update --models` unchanged. Verified
+live in all three positions: dev binary, PATH binary with remembered checkout,
+and a stray copy with neither (clean error naming the cargo command).
 
 ## 3. Session export/import
 

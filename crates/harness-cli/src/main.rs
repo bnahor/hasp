@@ -83,20 +83,25 @@ async fn main() -> Result<()> {
             return list_models_cmd(&provider).await;
         }
         Some("update") => {
-            if argv.get(1).map(String::as_str) != Some("--models") {
-                bail!("usage: harness update --models");
+            if argv.get(1).map(String::as_str) == Some("--models") {
+                let models = catalog::fetch_models_dev()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("fetching models.dev catalog: {e}"))?;
+                let priced = models.iter().filter(|m| m.priced()).count();
+                let path = catalog::store(&models)?;
+                println!(
+                    "stored {} models ({priced} priced) → {}",
+                    models.len(),
+                    path.display()
+                );
+                return Ok(());
             }
-            let models = catalog::fetch_models_dev()
-                .await
-                .map_err(|e| anyhow::anyhow!("fetching models.dev catalog: {e}"))?;
-            let priced = models.iter().filter(|m| m.priced()).count();
-            let path = catalog::store(&models)?;
-            println!(
-                "stored {} models ({priced} priced) → {}",
-                models.len(),
-                path.display()
-            );
-            return Ok(());
+            if argv.len() > 1 {
+                bail!(
+                    "usage: harness update (rebuild from the checkout) · harness update --models (catalog)"
+                );
+            }
+            return self_update().await;
         }
         Some("worktrees") => {
             let ws = Workspace::resolve(&std::env::current_dir()?)?;
@@ -877,6 +882,70 @@ async fn dynamic_default_model(provider: &str) -> Result<String> {
     ))
 }
 
+/// The checkout a binary lives in, if any: walks up from the executable so
+/// `target/release/harness`, `target/debug/harness` and nested profiles all
+/// resolve to the repo root.
+fn checkout_root(exe: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut dir = exe.parent()?;
+    for _ in 0..5 {
+        let Some(parent) = dir.parent() else { break };
+        if parent.join("crates/harness-cli/Cargo.toml").exists() {
+            return Some(parent.to_path_buf());
+        }
+        dir = parent;
+    }
+    None
+}
+
+/// Reinstall from the checkout this binary was built from. Not a network
+/// updater — there is no release channel yet — so "update" means "rebuild
+/// what is on disk", which is exactly right for a checkout-based install.
+async fn self_update() -> Result<()> {
+    let exe = std::env::current_exe()?;
+    // An installed binary is not next to any checkout, but the first
+    // successful update records where one lives, so later updates work from
+    // anywhere.
+    let remembered = std::fs::read_to_string(harness_workspace::harness_home()?.join("checkout"))
+        .ok()
+        .filter(|p| {
+            std::path::Path::new(p.trim())
+                .join("crates/harness-cli/Cargo.toml")
+                .exists()
+        });
+    let repo = checkout_root(&exe)
+        .or_else(|| remembered.map(|p| p.trim().to_string().into()))
+        .with_context(|| {
+            format!(
+                "no checkout found — run once from the repo, or: cargo install --path <repo>/crates/harness-cli"
+            )
+        })?;
+    println!(
+        "harness {} — rebuilding from {}",
+        env!("CARGO_PKG_VERSION"),
+        repo.display()
+    );
+    let status = tokio::process::Command::new("cargo")
+        .args(["install", "--path", "crates/harness-cli"])
+        .current_dir(&repo)
+        .status()
+        .await
+        .map_err(|e| anyhow!("running cargo: {e} — is it on PATH?"))?;
+    if !status.success() {
+        bail!("cargo install failed: {status}");
+    }
+    let out = std::process::Command::new(&exe).arg("--version").output()?;
+    std::fs::write(
+        harness_workspace::harness_home()?.join("checkout"),
+        repo.display().to_string(),
+    )?;
+    println!(
+        "→ {} (checkout remembered: {})",
+        String::from_utf8_lossy(&out.stdout).trim(),
+        repo.display()
+    );
+    Ok(())
+}
+
 /// `harness models [provider]`: what is usable right now — the fetched catalog
 /// for fixed providers, the live endpoint list for dynamic ones.
 async fn list_models_cmd(provider: &str) -> Result<()> {
@@ -936,11 +1005,7 @@ async fn doctor() -> Result<()> {
         None => println!("  install:     NOT on PATH"),
     }
     // A dev build inside target/ can say exactly where to install from.
-    if let Some(repo) = exe
-        .parent()
-        .and_then(|t| t.parent())
-        .filter(|repo| repo.join("crates/harness-cli/Cargo.toml").exists())
-    {
+    if let Some(repo) = checkout_root(&exe) {
         println!(
             "               dev build — install with: cargo install --path {}",
             repo.display()
