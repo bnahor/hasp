@@ -1,0 +1,193 @@
+//! Model catalog: bundled fallback (ids + windows) plus a fetched catalog from
+//! models.dev (`harness update --models`) — the same source codegraff uses.
+//! Prices are optional everywhere; cost display only appears when present.
+
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+
+use harness_core::Usage;
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ModelInfo {
+    pub id: String,
+    pub context_window: u64,
+    pub max_output: Option<u64>,
+    pub input_per_mtok: Option<f64>,
+    pub output_per_mtok: Option<f64>,
+    pub cache_read_per_mtok: Option<f64>,
+    pub cache_write_per_mtok: Option<f64>,
+}
+
+impl ModelInfo {
+    pub fn priced(&self) -> bool {
+        self.input_per_mtok.is_some() && self.output_per_mtok.is_some()
+    }
+}
+
+pub fn fallback_catalog() -> Vec<ModelInfo> {
+    let mut models: Vec<ModelInfo> = [
+        ("claude-sonnet-4-5", 200_000u64),
+        ("claude-sonnet-4-6", 200_000),
+        ("claude-opus-4-8", 200_000),
+        ("claude-haiku-4-5", 200_000),
+        ("glm-4.6", 200_000),
+        ("glm-4.5", 128_000),
+    ]
+    .into_iter()
+    .map(|(id, w)| ModelInfo {
+        id: id.into(),
+        context_window: w,
+        ..Default::default()
+    })
+    .collect();
+    models.extend(deepseek_models());
+    models
+}
+
+/// DeepSeek bills peak and off-peak rates; the peak (higher) numbers are used
+/// so the displayed cost is never below what was actually charged. Cache
+/// writes are not billed separately.
+fn deepseek_models() -> Vec<ModelInfo> {
+    let model = |id: &str, input: f64, output: f64, cache_read: f64| ModelInfo {
+        id: id.into(),
+        context_window: 1_000_000,
+        max_output: Some(384_000),
+        input_per_mtok: Some(input),
+        output_per_mtok: Some(output),
+        cache_read_per_mtok: Some(cache_read),
+        cache_write_per_mtok: None,
+    };
+    vec![
+        model("deepseek-v4-pro", 1.32, 3.96, 0.044),
+        model("deepseek-flash", 0.30, 1.20, 0.006),
+    ]
+}
+
+fn catalog_path() -> std::io::Result<PathBuf> {
+    Ok(harness_workspace::harness_home()
+        .map_err(|e| std::io::Error::other(e.to_string()))?
+        .join("models.json"))
+}
+
+pub fn path() -> std::io::Result<PathBuf> {
+    catalog_path()
+}
+
+pub fn load() -> Vec<ModelInfo> {
+    catalog_path()
+        .ok()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .filter(|models: &Vec<ModelInfo>| !models.is_empty())
+        .unwrap_or_else(fallback_catalog)
+}
+
+pub fn store(models: &[ModelInfo]) -> std::io::Result<PathBuf> {
+    let path = catalog_path()?;
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(models).expect("catalog serializes"),
+    )?;
+    Ok(path)
+}
+
+pub async fn fetch_models_dev() -> Result<Vec<ModelInfo>, String> {
+    let body = reqwest::Client::new()
+        .get("https://models.dev/api.json")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?
+        .text()
+        .await
+        .map_err(|e| e.to_string())?;
+    let v: serde_json::Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
+    let models = parse_models_dev(&v);
+    if models.is_empty() {
+        return Err("no anthropic models found in models.dev response".into());
+    }
+    Ok(models)
+}
+
+fn parse_models_dev(v: &serde_json::Value) -> Vec<ModelInfo> {
+    let Some(models) = v
+        .get("anthropic")
+        .and_then(|a| a.get("models"))
+        .and_then(|m| m.as_object())
+    else {
+        return Vec::new();
+    };
+    models
+        .iter()
+        .filter_map(|(id, m)| {
+            // Real schema (verified 2026-09): window in limit.context, output in limit.output.
+            let context_window = m.pointer("/limit/context")?.as_u64()?;
+            Some(ModelInfo {
+                id: id.clone(),
+                context_window,
+                max_output: m.pointer("/limit/output").and_then(|x| x.as_u64()),
+                input_per_mtok: m.pointer("/cost/input").and_then(|x| x.as_f64()),
+                output_per_mtok: m.pointer("/cost/output").and_then(|x| x.as_f64()),
+                cache_read_per_mtok: m.pointer("/cost/cache_read").and_then(|x| x.as_f64()),
+                cache_write_per_mtok: m.pointer("/cost/cache_write").and_then(|x| x.as_f64()),
+            })
+        })
+        .collect()
+}
+
+pub fn find<'a>(models: &'a [ModelInfo], id: &str) -> Option<&'a ModelInfo> {
+    models.iter().find(|m| m.id == id)
+}
+
+/// USD cost of a usage block given per-MTok prices; None when unpriced.
+pub fn cost_of(model: &ModelInfo, usage: &Usage) -> Option<f64> {
+    let input = model.input_per_mtok?;
+    let output = model.output_per_mtok?;
+    let cache_read = model.cache_read_per_mtok.unwrap_or(0.0);
+    let cache_write = model.cache_write_per_mtok.unwrap_or(0.0);
+    Some(
+        (usage.input as f64 * input
+            + usage.output as f64 * output
+            + usage.cache_read as f64 * cache_read
+            + usage.cache_write as f64 * cache_write)
+            / 1_000_000.0,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_models_dev_shape() {
+        let v: serde_json::Value = serde_json::json!({
+            "anthropic": {
+                "models": {
+                    "claude-sonnet-4-5": {
+                        "limit": {"context": 200000, "output": 64000},
+                        "cost": {"input": 3.0, "output": 15.0, "cache_read": 0.3, "cache_write": 3.75}
+                    },
+                    "claude-haiku-4-5": {"limit": {"context": 200000}}
+                }
+            }
+        });
+        let models = parse_models_dev(&v);
+        assert_eq!(models.len(), 2);
+        let sonnet = find(&models, "claude-sonnet-4-5").unwrap();
+        assert_eq!(sonnet.max_output, Some(64000));
+        assert!(sonnet.priced());
+
+        let usage = Usage {
+            input: 1_000_000,
+            output: 100_000,
+            cache_read: 10_000_000,
+            cache_write: 1_000_000,
+        };
+        let cost = cost_of(sonnet, &usage).unwrap();
+        // 1M*3 + 0.1M*15 + 10M*0.3 + 1M*3.75 = 3 + 1.5 + 3.0 + 3.75 = 11.25
+        assert!((cost - 11.25).abs() < 1e-9, "cost: {cost}");
+
+        let haiku = find(&models, "claude-haiku-4-5").unwrap();
+        assert!(!haiku.priced());
+        assert!(cost_of(haiku, &usage).is_none());
+    }
+}
