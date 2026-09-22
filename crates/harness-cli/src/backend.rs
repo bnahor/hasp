@@ -461,13 +461,12 @@ async fn read_response(
             result,
             error,
         }) = harness_wire::decode(&line)
+            && rid == id
         {
-            if rid == id {
-                if let Some(e) = error {
-                    return Err(anyhow!("{}: {}", e.code, e.message));
-                }
-                return Ok(result.unwrap_or(Value::Null));
+            if let Some(e) = error {
+                return Err(anyhow!("{}: {}", e.code, e.message));
             }
+            return Ok(result.unwrap_or(Value::Null));
         }
     }
 }

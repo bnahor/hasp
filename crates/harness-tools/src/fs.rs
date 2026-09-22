@@ -66,12 +66,12 @@ impl Tool for ReadTool {
                 end + 1
             ));
         }
-        if bytes.len() > READ_ARTIFACT_THRESHOLD {
-            if let Ok(rel) = ctx.artifacts.store("read", &bytes) {
-                body.push_str(&format!(
-                    "\n[full output stored at {rel}; page it with the read tool]"
-                ));
-            }
+        if bytes.len() > READ_ARTIFACT_THRESHOLD
+            && let Ok(rel) = ctx.artifacts.store("read", &bytes)
+        {
+            body.push_str(&format!(
+                "\n[full output stored at {rel}; page it with the read tool]"
+            ));
         }
         ToolOutput::text(body)
     }
@@ -107,10 +107,10 @@ impl Tool for WriteTool {
         if let GateDecision::Deny(reason) = ctx.gate.check_write(path) {
             return ToolOutput::error(format!("write not approved: {reason}"));
         }
-        if let Some(parent) = abs.parent() {
-            if let Err(e) = tokio::fs::create_dir_all(parent).await {
-                return ToolOutput::error(e.to_string());
-            }
+        if let Some(parent) = abs.parent()
+            && let Err(e) = tokio::fs::create_dir_all(parent).await
+        {
+            return ToolOutput::error(e.to_string());
         }
         // Read what was there so the report is the change itself; a missing file
         // simply makes every line an addition.

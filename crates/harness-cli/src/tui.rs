@@ -329,7 +329,7 @@ impl App {
         let lines = if kind == LineKind::Assistant {
             crate::markdown::render(text, base, self.ascii)
         } else {
-            render_plain(text, base, self.ascii)
+            render_plain(text, base)
         };
         for line in lines {
             self.entries.push(Entry::Line(line));
@@ -357,7 +357,7 @@ impl App {
                 LineKind::Tool
             }),
         );
-        let body = render_plain(&ev.content_preview, style_for(LineKind::Tool), self.ascii);
+        let body = render_plain(&ev.content_preview, style_for(LineKind::Tool));
         self.entries.push(Entry::Body {
             header,
             body,
@@ -1096,12 +1096,12 @@ impl App {
                 let r = self.call("session/branch", json!({"target": target}));
                 if r["moved"].as_bool().unwrap_or(false) {
                     self.push(
-                        format!("▪ leaf moved — new work continues from there"),
+                        "▪ leaf moved — new work continues from there".to_string(),
                         LineKind::Meta,
                     );
                 } else if !r.is_null() {
                     self.push(
-                        format!("no such entry — /branch lists ids"),
+                        "no such entry — /branch lists ids".to_string(),
                         LineKind::Error,
                     );
                 }
@@ -1393,7 +1393,7 @@ impl App {
             let inner = input_area.width.saturating_sub(2).max(1) as usize;
             let (row, col) = cursor_pos(&self.input, self.cursor, inner);
             let y = input_area.y + 1 + row.min(input_area.height.saturating_sub(2));
-            let x = input_area.x + 1 + (col as u16).min(input_area.width.saturating_sub(3));
+            let x = input_area.x + 1 + col.min(input_area.width.saturating_sub(3));
             f.set_cursor_position(Position { x, y });
         }
 
@@ -1645,8 +1645,10 @@ fn style_for(kind: LineKind) -> Style {
 
 /// Tool output: plain text, except `+`/`-`/`@@` lines from a diff, which get
 /// the usual green/red treatment so a write or edit reads at a glance.
-fn render_plain(text: &str, base: Style, ascii: bool) -> Vec<Line<'static>> {
-    let prefix = if ascii { "  " } else { "  " };
+fn render_plain(text: &str, base: Style) -> Vec<Line<'static>> {
+    // Tool output is indented under its call; there is no glyph to swap here,
+    // so this renderer ignores the ascii preference entirely.
+    let prefix = "  ";
     text.lines()
         .map(|l| {
             let t = crate::theme::current();
@@ -1761,11 +1763,8 @@ pub fn run(
                 Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
             }
         }
-        loop {
-            match prompt_rx.try_recv() {
-                Ok(req) => app.pending_prompt = Some(req),
-                Err(_) => break,
-            }
+        while let Ok(req) = prompt_rx.try_recv() {
+            app.pending_prompt = Some(req);
         }
         if app.should_quit {
             break;
@@ -1781,9 +1780,9 @@ pub fn run(
 
 /// `10m` → 600000 ms. Plain ASCII digits with an s/m/h suffix.
 pub fn fmt_every(ms: u64) -> String {
-    if ms % 3_600_000 == 0 {
+    if ms.is_multiple_of(3_600_000) {
         format!("{}h", ms / 3_600_000)
-    } else if ms % 60_000 == 0 {
+    } else if ms.is_multiple_of(60_000) {
         format!("{}m", ms / 60_000)
     } else {
         format!("{}s", ms / 1000)

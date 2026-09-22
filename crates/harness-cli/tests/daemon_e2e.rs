@@ -292,13 +292,12 @@ async fn session_cancel_aborts_in_flight_prompt() {
                 result,
                 error,
             }) = decode(&line)
+                && rid == id
             {
-                if rid == id {
-                    if let Some(e) = error {
-                        panic!("response {id} error: {} {}", e.code, e.message);
-                    }
-                    return result.unwrap_or(serde_json::Value::Null);
+                if let Some(e) = error {
+                    panic!("response {id} error: {} {}", e.code, e.message);
                 }
+                return result.unwrap_or(serde_json::Value::Null);
             }
         }
     }
@@ -388,13 +387,12 @@ async fn agent_flow_over_the_wire() {
                 result,
                 error,
             }) = decode(&line)
+                && rid == id
             {
-                if rid == id {
-                    if let Some(e) = error {
-                        panic!("response {id} error: {} {}", e.code, e.message);
-                    }
-                    return result.unwrap_or(serde_json::Value::Null);
+                if let Some(e) = error {
+                    panic!("response {id} error: {} {}", e.code, e.message);
                 }
+                return result.unwrap_or(serde_json::Value::Null);
             }
         }
     }
@@ -405,12 +403,11 @@ async fn agent_flow_over_the_wire() {
                 .await
                 .expect("notice within timeout")
                 .unwrap();
-            if let Some(Wire::Notification { method, params }) = decode(&line) {
-                if method == harness_wire::METHOD_SESSION_UPDATE
-                    && params["text"].as_str().unwrap_or("").contains(needle)
-                {
-                    return params["text"].as_str().unwrap_or_default().to_string();
-                }
+            if let Some(Wire::Notification { method, params }) = decode(&line)
+                && method == harness_wire::METHOD_SESSION_UPDATE
+                && params["text"].as_str().unwrap_or("").contains(needle)
+            {
+                return params["text"].as_str().unwrap_or_default().to_string();
             }
         }
     }
@@ -525,13 +522,12 @@ async fn goal_and_heartbeat_over_the_wire() {
                 result,
                 error,
             }) = decode(&line)
+                && rid == id
             {
-                if rid == id {
-                    if let Some(e) = error {
-                        panic!("response {id} error: {} {}", e.code, e.message);
-                    }
-                    return result.unwrap_or(serde_json::Value::Null);
+                if let Some(e) = error {
+                    panic!("response {id} error: {} {}", e.code, e.message);
                 }
+                return result.unwrap_or(serde_json::Value::Null);
             }
         }
     }
@@ -546,13 +542,13 @@ async fn goal_and_heartbeat_over_the_wire() {
                 .await
                 .expect("update within timeout")
                 .unwrap();
-            if let Some(Wire::Notification { method, params }) = decode(&line) {
-                if method == harness_wire::METHOD_SESSION_UPDATE {
-                    let text = params["text"].as_str().unwrap_or("");
-                    seen.push_str(text);
-                    if text.contains(needle) || seen.contains(needle) {
-                        return seen;
-                    }
+            if let Some(Wire::Notification { method, params }) = decode(&line)
+                && method == harness_wire::METHOD_SESSION_UPDATE
+            {
+                let text = params["text"].as_str().unwrap_or("");
+                seen.push_str(text);
+                if text.contains(needle) || seen.contains(needle) {
+                    return seen;
                 }
             }
         }

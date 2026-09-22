@@ -32,10 +32,10 @@ impl GateCore {
         }
         let first = command.split_whitespace().next().unwrap_or("").to_string();
         let simple = is_simple(command);
-        if simple && self.approved_bash.iter().any(|w| *w == first) {
+        if simple && self.approved_bash.contains(&first) {
             return GateDecision::Allow;
         }
-        if simple && self.allowlist.iter().any(|w| *w == first) && !escapes_cwd(command) {
+        if simple && self.allowlist.contains(&first) && !escapes_cwd(command) {
             return GateDecision::Allow;
         }
         if !self.interactive {

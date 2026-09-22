@@ -166,6 +166,16 @@ endpoints, so the same client, streaming, tool-calling and cache breakpoints
 apply. DeepSeek defaults to `deepseek-v4-pro`; `--model deepseek-flash` is ~4×
 cheaper.
 
+## Tests and CI
+
+`cargo test --workspace` (143 tests) plus `cargo fmt --all --check` and
+`cargo clippy --workspace --all-targets -- -D warnings`, which
+`.github/workflows/ci.yml` runs on macOS and Linux. Tagging `vX.Y.Z` builds
+binaries for both macOS architectures and Linux via `release.yml`, and
+`install.sh` installs a published release (`HARNESS_REPO=owner/name sh
+install.sh`) — both are inert until the repo has a remote, which is why the
+installer says so instead of failing obscurely.
+
 ## Tests
 
 ```sh

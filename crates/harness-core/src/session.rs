@@ -286,13 +286,13 @@ impl SessionManager {
                 ws.identity().head.as_deref().unwrap_or("-")
             );
         }
-        if let (Some(prev), Some(now)) = (&session.header.dirty_state, ws.dirty_state()) {
-            if prev != &now {
-                eprintln!(
-                    "warning: workspace dirtiness changed: was {} modified/{} untracked, now {}/{}",
-                    prev.modified, prev.untracked, now.modified, now.untracked
-                );
-            }
+        if let (Some(prev), Some(now)) = (&session.header.dirty_state, ws.dirty_state())
+            && prev != &now
+        {
+            eprintln!(
+                "warning: workspace dirtiness changed: was {} modified/{} untracked, now {}/{}",
+                prev.modified, prev.untracked, now.modified, now.untracked
+            );
         }
         Ok(Some(session))
     }
@@ -872,7 +872,7 @@ impl SessionManager {
                 path,
             });
         }
-        out.sort_by(|a, b| b.created_ms.cmp(&a.created_ms));
+        out.sort_by_key(|s| std::cmp::Reverse(s.created_ms));
         Ok(out)
     }
 }

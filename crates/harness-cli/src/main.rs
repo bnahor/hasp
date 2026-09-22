@@ -195,7 +195,7 @@ async fn main() -> Result<()> {
                     if names.is_empty() {
                         println!("no child worktrees");
                     } else {
-                        println!("{:<22} {:<26} {}", "worktree", "branch", "state");
+                        println!("{:<22} {:<26} state", "worktree", "branch");
                         for name in names {
                             println!(
                                 "{:<22} {:<26} {}",
@@ -212,7 +212,7 @@ async fn main() -> Result<()> {
                     println!("\nharness worktrees prune <name> [--force]");
                 }
                 Some("prune") => {
-                    let force = args.iter().any(|a| *a == "--force");
+                    let force = args.contains(&"--force");
                     let Some(name) = args.iter().skip(1).find(|a| !a.starts_with("--")) else {
                         bail!("usage: harness worktrees prune <name> [--force]");
                     };
@@ -692,7 +692,7 @@ async fn plain_repl(
                 let mut eng = engine.lock().await;
                 let model = eng.model.clone();
                 let max_tokens = eng.max_tokens;
-                let e: &mut Engine = &mut *eng;
+                let e: &mut Engine = &mut eng;
                 let est = e.context_est_tokens();
                 match harness_core::compaction::compact(
                     e.provider.as_ref(),
@@ -829,10 +829,10 @@ async fn plain_repl(
             }
             cmd if cmd == "/worktree-exit" || cmd.starts_with("/worktree-exit ") => {
                 if let Some((old_ws, name)) = worktree.take() {
-                    if cmd.contains("remove") || cmd.contains(" rm") {
-                        if let Err(e) = old_ws.remove_worktree(&name) {
-                            eprintln!("worktree remove failed: {e} (kept)");
-                        }
+                    if (cmd.contains("remove") || cmd.contains(" rm"))
+                        && let Err(e) = old_ws.remove_worktree(&name)
+                    {
+                        eprintln!("worktree remove failed: {e} (kept)");
                     }
                     let mut eng = engine.lock().await;
                     eng.workspace = old_ws.clone();
@@ -1004,9 +1004,7 @@ async fn self_update() -> Result<()> {
     let repo = checkout_root(&exe)
         .or_else(|| remembered.map(|p| p.trim().to_string().into()))
         .with_context(|| {
-            format!(
-                "no checkout found — run once from the repo, or: cargo install --path <repo>/crates/harness-cli"
-            )
+            "no checkout found — run once from the repo, or: cargo install --path <repo>/crates/harness-cli".to_string()
         })?;
     println!(
         "harness {} — rebuilding from {}",

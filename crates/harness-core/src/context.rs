@@ -94,10 +94,10 @@ pub fn prune_stale(messages: &mut [AgentMessage]) {
         .copied()
         .collect();
     for i in tool_idx {
-        if !keep.contains(&i) {
-            if let AgentMessage::ToolResult { content, .. } = &mut messages[i] {
-                *content = CLEARED_MARKER.to_string();
-            }
+        if !keep.contains(&i)
+            && let AgentMessage::ToolResult { content, .. } = &mut messages[i]
+        {
+            *content = CLEARED_MARKER.to_string();
         }
     }
 }
@@ -113,15 +113,15 @@ fn load_instructions(root: &Path) -> Option<String> {
     let mut parts = Vec::new();
     for dir in dirs {
         for name in ["AGENTS.md", "HARNESS.md", "CLAUDE.md"] {
-            if let Ok(text) = std::fs::read_to_string(dir.join(name)) {
-                if !text.trim().is_empty() {
-                    parts.push(format!(
-                        "## from {name} in {}\n\n{}",
-                        dir.display(),
-                        text.trim()
-                    ));
-                    break;
-                }
+            if let Ok(text) = std::fs::read_to_string(dir.join(name))
+                && !text.trim().is_empty()
+            {
+                parts.push(format!(
+                    "## from {name} in {}\n\n{}",
+                    dir.display(),
+                    text.trim()
+                ));
+                break;
             }
         }
     }

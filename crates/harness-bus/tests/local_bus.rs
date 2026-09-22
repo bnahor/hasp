@@ -47,10 +47,10 @@ async fn wait_completed(bus: &LocalBus, child_id: &str) {
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         let list = bus.list_children().await;
-        if let Some(c) = list.iter().find(|c| c.child_id == child_id) {
-            if c.status != ChildStatus::Running {
-                return;
-            }
+        if let Some(c) = list.iter().find(|c| c.child_id == child_id)
+            && c.status != ChildStatus::Running
+        {
+            return;
         }
         assert!(
             Instant::now() < deadline,

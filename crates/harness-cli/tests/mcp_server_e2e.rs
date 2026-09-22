@@ -14,7 +14,6 @@ fn config(cwd: &std::path::Path, env: &[(&str, &str)]) -> McpServerConfig {
             .iter()
             .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
             .collect(),
-        ..Default::default()
     }
 }
 

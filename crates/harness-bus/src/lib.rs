@@ -72,7 +72,7 @@ fn last_assistant_text(session: &SessionManager) -> String {
 fn snippet(text: &str, cap: usize) -> String {
     let mut s: String = text.chars().take(cap).collect();
     if text.chars().count() > cap {
-        s.push_str("…");
+        s.push('…');
     }
     s
 }
