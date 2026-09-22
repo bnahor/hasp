@@ -80,6 +80,7 @@ fn request() -> ModelRequest {
         messages: vec![AgentMessage::User {
             content: "hi".into(),
             ts: 0,
+            images: Vec::new(),
         }],
         model: "m".into(),
         max_tokens: 32,

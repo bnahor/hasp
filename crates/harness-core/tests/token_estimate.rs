@@ -54,6 +54,7 @@ fn measured_size_comes_from_the_last_sample_until_a_compaction() {
     session.append_message(AgentMessage::User {
         content: "hi".into(),
         ts: 0,
+        images: Vec::new(),
     });
     assert_eq!(
         session.last_input_tokens(),

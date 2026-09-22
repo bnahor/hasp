@@ -58,10 +58,11 @@ impl Tool for McpTool {
     }
 
     async fn execute(&self, args: Value, _ctx: &mut ToolCtx<'_>) -> ToolOutput {
-        match self.client.call_tool(&self.def.name, args).await {
-            Ok((text, is_error)) => ToolOutput {
+        match self.client.call_tool_full(&self.def.name, args).await {
+            Ok((text, is_error, images)) => ToolOutput {
                 content: text,
                 is_error,
+                images,
             },
             Err(e) => ToolOutput::error(format!("mcp server “{}” failed: {e}", self.client.name)),
         }
@@ -75,19 +76,33 @@ fn tool_name(server: &str, tool: &str) -> String {
 /// Flatten an MCP `tools/call` result into text. Content blocks are the
 /// protocol's shape; anything unrecognised is passed through as JSON so
 /// information is never silently dropped.
-pub(crate) fn render_content(result: &Value) -> (String, bool) {
+/// Text, error flag and images of a `tools/call` result. MCP `image` items
+/// become real images for the model — as text they would be kilobytes of
+/// base64 it cannot see.
+pub(crate) fn render_content_full(result: &Value) -> (String, bool, Vec<harness_core::Image>) {
     let is_error = result["isError"].as_bool().unwrap_or(false);
     let Some(items) = result["content"].as_array() else {
-        return (result.to_string(), is_error);
+        return (result.to_string(), is_error, Vec::new());
     };
     let mut parts = Vec::new();
+    let mut images = Vec::new();
     for item in items {
         match item["type"].as_str() {
             Some("text") => parts.push(item["text"].as_str().unwrap_or_default().to_string()),
+            Some("image") => match (item["data"].as_str(), item["mimeType"].as_str()) {
+                (Some(data), Some(mime)) => {
+                    images.push(harness_core::Image {
+                        media_type: mime.to_string(),
+                        data: data.to_string(),
+                    });
+                    parts.push(format!("[image {}]", images.len()));
+                }
+                _ => parts.push("[malformed image content]".into()),
+            },
             _ => parts.push(item.to_string()),
         }
     }
-    (parts.join("\n"), is_error)
+    (parts.join("\n"), is_error, images)
 }
 
 /// `initialize` params — the client half of the MCP handshake.

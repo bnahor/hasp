@@ -29,6 +29,9 @@ pub struct OpenAICompat {
     window: usize,
     retry_base_ms: u64,
     stall: std::time::Duration,
+    /// Send images (`HARNESS_COMPAT_VISION=off` for text-only models, which
+    /// then get a placeholder instead of an error on every later request).
+    vision: bool,
     client: reqwest::Client,
 }
 
@@ -48,6 +51,10 @@ impl OpenAICompat {
             window,
             retry_base_ms: crate::retry::default_base_ms(),
             stall: crate::retry::stall_timeout(),
+            vision: !matches!(
+                std::env::var("HARNESS_COMPAT_VISION").as_deref(),
+                Ok("off" | "0" | "false")
+            ),
             client: reqwest::Client::builder()
                 .build()
                 .expect("reqwest client builds"),
@@ -124,10 +131,22 @@ pub async fn list_models(base_url: &str, api_key: &str) -> Result<Vec<String>, S
 /// One request body for the endpoint. Mapping is public to the crate's tests:
 /// the journal's message order (assistant tool_calls, then their results) is
 /// exactly what this format requires.
-fn request_body(model: &str, req: &ModelRequest, stream_options: bool) -> Value {
+fn request_body(
+    req: &ModelRequest,
+    default_model: &str,
+    stream_options: bool,
+    vision: bool,
+) -> Value {
+    // The request's model: `/model` switches it mid-session. The client's own
+    // is only a fallback for a request that names none.
+    let model = if req.model.is_empty() {
+        default_model
+    } else {
+        &req.model
+    };
     let mut body = json!({
         "model": model,
-        "messages": request_messages(req),
+        "messages": request_messages(req, vision),
         "stream": true,
         "max_tokens": req.max_tokens,
     });
@@ -156,12 +175,48 @@ fn request_body(model: &str, req: &ModelRequest, stream_options: bool) -> Value 
     body
 }
 
-fn request_messages(req: &ModelRequest) -> Value {
+fn image_part(img: &harness_core::Image) -> Value {
+    json!({
+        "type": "image_url",
+        "image_url": {"url": format!("data:{};base64,{}", img.media_type, img.data)},
+    })
+}
+
+/// Text plus images as one user message: a plain string when there are no
+/// images (what every server accepts), content parts when there are.
+fn user_message(text: &str, images: &[harness_core::Image], vision: bool) -> Value {
+    if images.is_empty() {
+        return json!({"role": "user", "content": text});
+    }
+    if !vision {
+        return json!({"role": "user", "content": format!("{text}\n{}", crate::omitted(images.len()))});
+    }
+    let mut parts = Vec::new();
+    if !text.is_empty() {
+        parts.push(json!({"type": "text", "text": text}));
+    }
+    parts.extend(images.iter().map(image_part));
+    json!({"role": "user", "content": parts})
+}
+
+fn request_messages(req: &ModelRequest, vision: bool) -> Value {
     let mut out = vec![json!({"role": "system", "content": req.system})];
+    // Tool messages are text-only in this format, so a tool's images follow
+    // the run of tool results as one user message.
+    let mut tool_images: Vec<harness_core::Image> = Vec::new();
     for m in &req.messages {
+        if !matches!(m, AgentMessage::ToolResult { .. }) && !tool_images.is_empty() {
+            out.push(user_message(
+                "Images returned by the tool calls above:",
+                &std::mem::take(&mut tool_images),
+                vision,
+            ));
+        }
         match m {
-            AgentMessage::User { content, .. } => {
-                out.push(json!({"role": "user", "content": content}));
+            AgentMessage::User {
+                content, images, ..
+            } => {
+                out.push(user_message(content, images, vision));
             }
             AgentMessage::Assistant { content, .. } => {
                 let text: String = content
@@ -200,13 +255,24 @@ fn request_messages(req: &ModelRequest) -> Value {
             AgentMessage::ToolResult {
                 tool_call_id,
                 content,
+                images,
                 ..
-            } => out.push(json!({
-                "role": "tool",
-                "tool_call_id": tool_call_id,
-                "content": content,
-            })),
+            } => {
+                out.push(json!({
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": content,
+                }));
+                tool_images.extend(images.iter().cloned());
+            }
         }
+    }
+    if !tool_images.is_empty() {
+        out.push(user_message(
+            "Images returned by the tool calls above:",
+            &tool_images,
+            vision,
+        ));
     }
     Value::Array(out)
 }
@@ -289,7 +355,7 @@ impl Provider for OpenAICompat {
                 .header("authorization", format!("Bearer {}", self.api_key))
                 .json(&body)
         };
-        let with_usage = request_body(&self.model, req, true);
+        let with_usage = request_body(req, &self.model, true, self.vision);
         let resp = match crate::retry::send_retrying(self.retry_base_ms, || {
             post(with_usage.clone())
         })
@@ -299,7 +365,7 @@ impl Provider for OpenAICompat {
             // Servers predating `stream_options` reject it with 400; the
             // request is otherwise identical, we just lose the usage chunk.
             Err(ProviderError::Api { status: 400, .. }) => {
-                let plain = request_body(&self.model, req, false);
+                let plain = request_body(req, &self.model, false, self.vision);
                 crate::retry::send_retrying(self.retry_base_ms, || post(plain.clone())).await?
             }
             Err(e) => return Err(e),
@@ -405,6 +471,7 @@ mod tests {
             AgentMessage::User {
                 content: "hi".into(),
                 ts: 0,
+                images: Vec::new(),
             },
             AgentMessage::Assistant {
                 content: vec![
@@ -429,9 +496,10 @@ mod tests {
                 content: "out".into(),
                 is_error: false,
                 ts: 0,
+                images: Vec::new(),
             },
         ];
-        let body = request_body("m", &req(messages, vec![]), false);
+        let body = request_body(&req(messages, vec![]), "m", false, true);
         let msgs = body["messages"].as_array().unwrap();
         assert_eq!(msgs.len(), 4);
         assert_eq!(msgs[0]["role"], "system");
@@ -453,7 +521,7 @@ mod tests {
             description: "run".into(),
             input_schema: json!({"type": "object", "properties": {"command": {"type": "string"}}}),
         }];
-        let body = request_body("m", &req(vec![], tools), true);
+        let body = request_body(&req(vec![], tools), "m", true, true);
         let f = &body["tools"][0]["function"];
         assert_eq!(f["name"], "bash");
         assert_eq!(f["parameters"]["type"], "object");
@@ -517,5 +585,56 @@ mod tests {
         assert_eq!(finish_reason_to_stop(Some("length")), StopReason::Length);
         assert_eq!(finish_reason_to_stop(None), StopReason::Stop);
         assert_eq!(finish_reason_to_stop(Some("stop")), StopReason::Stop);
+    }
+
+    #[test]
+    fn images_become_content_parts_or_placeholders() {
+        let img = harness_core::Image {
+            media_type: "image/png".into(),
+            data: "AAAA".into(),
+        };
+        let messages = vec![
+            AgentMessage::User {
+                content: "look".into(),
+                ts: 0,
+                images: vec![img.clone()],
+            },
+            AgentMessage::Assistant {
+                content: vec![ContentBlock::ToolCall {
+                    id: "c".into(),
+                    name: "read".into(),
+                    arguments: json!({}),
+                }],
+                provider: "p".into(),
+                model: "m".into(),
+                usage: Default::default(),
+                stop_reason: Default::default(),
+                ts: 1,
+            },
+            AgentMessage::ToolResult {
+                tool_call_id: "c".into(),
+                tool_name: "read".into(),
+                content: "x.png".into(),
+                is_error: false,
+                ts: 2,
+                images: vec![img],
+            },
+        ];
+        let body = request_body(&req(messages.clone(), vec![]), "m", false, true);
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(
+            msgs[1]["content"][1]["image_url"]["url"],
+            "data:image/png;base64,AAAA"
+        );
+        assert_eq!(msgs[3]["role"], "tool");
+        assert_eq!(
+            msgs[4]["role"], "user",
+            "tool images follow the tool results"
+        );
+        assert_eq!(msgs[4]["content"][1]["type"], "image_url");
+
+        let body = request_body(&req(messages, vec![]), "m", false, false);
+        assert!(!body.to_string().contains("AAAA"));
+        assert!(body.to_string().contains("image(s) omitted"));
     }
 }

@@ -32,6 +32,7 @@ fn tool_result(id: &str) -> AgentMessage {
         content: "done".into(),
         is_error: false,
         ts: 2,
+        images: Vec::new(),
     }
 }
 
@@ -58,6 +59,7 @@ fn an_interrupted_tool_turn_is_closed_on_reopen() {
     session.append_message(AgentMessage::User {
         content: "go".into(),
         ts: 0,
+        images: Vec::new(),
     });
     session.append_message(assistant_turn(&[("a", "bash"), ("b", "read")]));
     session.append_message(tool_result("a")); // "b" never reported: killed here

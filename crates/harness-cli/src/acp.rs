@@ -244,6 +244,25 @@ fn prompt_text(params: &Value) -> String {
         .unwrap_or_default()
 }
 
+/// ACP `image` content blocks, in the daemon wire's shape.
+fn prompt_images(params: &Value) -> Vec<Value> {
+    params["prompt"]
+        .as_array()
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter(|b| b["type"] == "image")
+                .filter_map(|b| {
+                    Some(json!({
+                        "mediaType": b["mimeType"].as_str()?,
+                        "data": b["data"].as_str()?,
+                    }))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 pub async fn serve() -> Result<()> {
     let out = Out(Arc::new(Mutex::new(tokio::io::stdout())));
     let perms: Perms = Arc::new(Mutex::new(HashMap::new()));
@@ -292,7 +311,7 @@ pub async fn serve() -> Result<()> {
                         "agentCapabilities": {
                             "loadSession": true,
                             "promptCapabilities": {
-                                "image": false, "audio": false, "embeddedContext": false
+                                "image": true, "audio": false, "embeddedContext": false
                             }
                         },
                         "agentInfo": {
@@ -347,10 +366,11 @@ pub async fn serve() -> Result<()> {
                     continue;
                 };
                 let prompt = prompt_text(&params);
+                let images = prompt_images(&params);
                 let wire_id = session
                     .send(
                         harness_wire::METHOD_SESSION_PROMPT,
-                        json!({"prompt": prompt}),
+                        json!({"prompt": prompt, "images": images}),
                     )
                     .await?;
                 match await_reply(session, wire_id, &out, &perms, &mut next_acp_req).await {

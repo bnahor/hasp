@@ -8,6 +8,7 @@ pub mod cron;
 pub mod engine;
 pub mod extensions;
 pub mod hooks;
+pub mod image;
 pub mod session;
 pub mod trace;
 
@@ -88,12 +89,28 @@ impl Usage {
     }
 }
 
+/// An image the model sees: base64 data plus its media type. Stored inline in
+/// the journal so a session stays self-contained (export/import carry it).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Image {
+    pub media_type: String,
+    /// Standard base64, no line breaks.
+    pub data: String,
+}
+
+/// Rough context cost of one image. Providers downscale to about 1.5k px on
+/// the long edge (≈ w·h/750 tokens), so this is the order of magnitude, not
+/// an exact count; the provider's measured usage replaces it after a sample.
+pub const IMAGE_TOKEN_ESTIMATE: u64 = 1_600;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "role", rename_all = "snake_case")]
 pub enum AgentMessage {
     User {
         content: String,
         ts: i64,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<Image>,
     },
     Assistant {
         content: Vec<ContentBlock>,
@@ -109,7 +126,20 @@ pub enum AgentMessage {
         content: String,
         is_error: bool,
         ts: i64,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<Image>,
     },
+}
+
+impl AgentMessage {
+    /// A text-only user message stamped now.
+    pub fn user(content: impl Into<String>) -> Self {
+        AgentMessage::User {
+            content: content.into(),
+            ts: session::now_ms(),
+            images: Vec::new(),
+        }
+    }
 }
 
 /// Token estimate for budgeting and the context bar.
@@ -128,9 +158,12 @@ pub fn estimate_tokens(messages: &[AgentMessage]) -> u64 {
     messages
         .iter()
         .map(|m| match m {
-            AgentMessage::User { content, .. } | AgentMessage::ToolResult { content, .. } => {
-                estimate_text_tokens(content)
+            AgentMessage::User {
+                content, images, ..
             }
+            | AgentMessage::ToolResult {
+                content, images, ..
+            } => estimate_text_tokens(content) + images.len() as u64 * IMAGE_TOKEN_ESTIMATE,
             AgentMessage::Assistant { content, .. } => content
                 .iter()
                 .map(|b| match b {
@@ -275,6 +308,8 @@ pub const INVALID_INPUT_KEY: &str = "__invalid_input";
 pub struct ToolOutput {
     pub content: String,
     pub is_error: bool,
+    /// Images for the model to see alongside the text (e.g. `read` of a PNG).
+    pub images: Vec<Image>,
 }
 
 impl ToolOutput {
@@ -282,6 +317,7 @@ impl ToolOutput {
         Self {
             content: content.into(),
             is_error: false,
+            images: Vec::new(),
         }
     }
 
@@ -289,7 +325,13 @@ impl ToolOutput {
         Self {
             content: content.into(),
             is_error: true,
+            images: Vec::new(),
         }
+    }
+
+    pub fn with_image(mut self, image: Image) -> Self {
+        self.images.push(image);
+        self
     }
 }
 

@@ -3,7 +3,7 @@
 //! permission round-trip, `session/update` fan-out to the owning client.
 
 use anyhow::{Context, Result, anyhow};
-use harness_core::engine::{Canceller, Engine, TurnSink};
+use harness_core::engine::{Canceller, Engine, TurnSink, post_turn_check_shared, run_turn_shared};
 use harness_core::session::SessionManager;
 use harness_core::{AgentMessage, Bus, ContentBlock, Gate, GateDecision, Provider, Sink};
 use harness_provider::catalog;
@@ -309,6 +309,10 @@ impl Gate for WireGate {
 /// running goals and heartbeats, and what lets a turn survive its client.
 struct Resident {
     engine: Arc<Mutex<Engine>>,
+    /// Held for a whole turn (and its continuations), so turns never
+    /// interleave. The engine lock itself is only held for moments, which is
+    /// what lets stats, model and goal requests through mid-turn.
+    turn: Arc<Mutex<()>>,
     bus: Arc<harness_bus::LocalBus>,
     canceller: Canceller,
     session_id: std::sync::Mutex<String>,
@@ -435,6 +439,26 @@ fn provider_factory() -> harness_bus::ProviderFactory {
             None => Err(format!("unknown provider “{provider}”")),
         }
     })
+}
+
+/// Refusal for requests that restructure the session while a turn runs.
+const TURN_BUSY: &str = "a turn is running — wait for it, or cancel it (esc), then retry";
+
+/// `images: [{mediaType, data}]` on a prompt request (ACP editors send them).
+fn wire_images(params: &serde_json::Value) -> Vec<harness_core::Image> {
+    params["images"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|i| {
+                    Some(harness_core::Image {
+                        media_type: i["mediaType"].as_str()?.to_string(),
+                        data: i["data"].as_str()?.to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn last_assistant_text(session: &SessionManager) -> String {
@@ -890,6 +914,7 @@ impl Handler {
         let heartbeats = Arc::new(Mutex::new(hbs));
         let resident = Arc::new(Resident {
             engine,
+            turn: Arc::new(Mutex::new(())),
             bus,
             canceller,
             session_id: std::sync::Mutex::new(session_id),
@@ -1038,12 +1063,19 @@ impl Handler {
             return;
         };
         let prompt = prompt.to_string();
+        let images = wire_images(&params);
         // Reset before the task starts so a cancel that arrives after this
         // request applies to this turn, and one from before does not.
         st.canceller.reset();
         let resident = st.clone();
         let out = self.out_tx.clone();
-        tokio::spawn(run_turn_loop(resident, prompt, Some((out, id)), None));
+        tokio::spawn(run_turn_loop(
+            resident,
+            prompt,
+            images,
+            Some((out, id)),
+            None,
+        ));
     }
 
     /// Heartbeat/one-shot delivery: fire a prompt with no RPC reply pending.
@@ -1177,23 +1209,12 @@ impl Handler {
             self.reply(id, Err(RpcError::internal("no session")));
             return;
         };
-        let engine = st.engine.clone();
+        let resident = st.clone();
         let out = self.out_tx.clone();
         tokio::spawn(async move {
-            let mut eng = engine.lock().await;
-            let model = eng.model.clone();
-            let max_tokens = eng.max_tokens;
-            let e: &mut Engine = &mut eng;
-            let est = e.context_est_tokens();
-            let msg = match harness_core::compaction::compact(
-                e.provider.as_ref(),
-                &model,
-                &mut e.session,
-                max_tokens,
-                est,
-            )
-            .await
-            {
+            // After any running turn: compaction rewrites what the turn reads.
+            let _turn = resident.turn.lock().await;
+            let msg = match harness_core::engine::compact_shared(&*resident.engine).await {
                 Ok(cs) => Wire::ok(
                     id,
                     serde_json::json!({
@@ -1281,7 +1302,12 @@ impl Handler {
                                 .map(|(bid, label)| serde_json::json!({"id": bid, "label": label}))
                                 .collect(),
                         )),
-                        Some(target) => Ok(serde_json::json!({"moved": eng.session.branch(target)})),
+                        Some(target) => match st.turn.try_lock() {
+                        // Moving the leaf under a running turn would graft its
+                        // next sample onto another branch.
+                        Err(_) => Err(TURN_BUSY.into()),
+                        Ok(_turn) => Ok(serde_json::json!({"moved": eng.session.branch(target)})),
+                    },
                     },
                     harness_wire::METHOD_SESSION_FORK => eng
                         .session
@@ -1317,6 +1343,10 @@ impl Handler {
                 name
             };
             let resident = st.clone();
+            // Held throughout: no turn may start while the session is swapped.
+            let Ok(_turn) = resident.turn.clone().try_lock_owned() else {
+                return Err(TURN_BUSY.into());
+            };
             let old_key = resident.ws_key();
             let mut eng = st.engine.lock().await;
             let ws2 = eng
@@ -1376,6 +1406,9 @@ impl Handler {
                 return Err("no session".into());
             };
             let resident = st.clone();
+            let Ok(_turn) = resident.turn.clone().try_lock_owned() else {
+                return Err(TURN_BUSY.into());
+            };
             let current_key = resident.ws_key();
             let Some((old_ws, name)) = resident
                 .worktree_stack
@@ -1438,22 +1471,24 @@ impl Handler {
 async fn run_turn_loop(
     resident: Arc<Resident>,
     prompt: String,
+    images: Vec<harness_core::Image>,
     reply: Option<(mpsc::UnboundedSender<String>, u64)>,
     hb: Option<String>,
 ) {
-    let mut eng = resident.engine.lock().await;
+    let _turn = resident.turn.lock().await;
+    let cell: &Mutex<Engine> = &resident.engine;
     // Forwards to whichever client is attached, so a turn survives its client:
     // output written while nobody is attached is dropped, not lost, because the
     // journal is canonical and a later `session/load` returns all of it.
     let mut sink = resident.client.clone();
-    let mut res = eng.run_turn(&prompt, &mut sink).await;
+    let mut res = run_turn_shared(cell, &prompt, images, &mut sink).await;
     while res.is_ok() {
-        match eng.post_turn_check(&mut sink).await {
-            Some(cont) => res = eng.run_turn(&cont, &mut sink).await,
+        match post_turn_check_shared(cell, &mut sink).await {
+            Some(cont) => res = run_turn_shared(cell, &cont, Vec::new(), &mut sink).await,
             None => break,
         }
     }
-    let text = last_assistant_text(&eng.session);
+    let text = last_assistant_text(&cell.lock().await.session);
     // Captured before the reply is built, which moves `res`.
     let ok = res.is_ok();
     match reply {
@@ -1505,7 +1540,6 @@ async fn heartbeat_loop(resident: Arc<Resident>) {
         }
         let heartbeats = resident.heartbeats.clone();
         let notice_inbox = resident.notice_inbox.clone();
-        let engine = resident.engine.clone();
         let now = harness_core::session::now_ms();
         let mut due: Vec<(String, String, String)> = Vec::new();
         let mut fired_one_shots: Vec<String> = Vec::new();
@@ -1538,11 +1572,17 @@ async fn heartbeat_loop(resident: Arc<Resident>) {
             };
             let head = format!("[{tag} {id}]");
             let prompt = format!("{head} {instruction}");
-            if engine.try_lock().is_ok() {
+            if resident.turn.try_lock().is_ok() {
                 // A due tick fires whether or not a client is attached: this is
                 // the whole point of a resident session.
                 let hb = id.clone();
-                tokio::spawn(run_turn_loop(resident.clone(), prompt, None, Some(hb)));
+                tokio::spawn(run_turn_loop(
+                    resident.clone(),
+                    prompt,
+                    Vec::new(),
+                    None,
+                    Some(hb),
+                ));
             } else {
                 // Coalesce: a slow turn must not accumulate a tick backlog.
                 let mut inbox = notice_inbox.lock().expect("notice inbox");

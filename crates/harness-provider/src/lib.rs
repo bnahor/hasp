@@ -33,6 +33,12 @@ pub fn build(provider: &str, api_key: String, model: String) -> Option<Box<dyn P
 
 use harness_core::Provider;
 
+/// What a model that cannot see images gets in their place — the session
+/// stays usable instead of failing every later request on the same history.
+pub(crate) fn omitted(n: usize) -> String {
+    format!("[{n} image(s) omitted: this model does not accept images]")
+}
+
 /// Default model for a provider id (`--provider` / `HARNESS_PROVIDER`). One
 /// definition, so the client and the daemon can never disagree about it.
 pub fn default_model(provider: &str) -> &'static str {

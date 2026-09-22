@@ -175,10 +175,12 @@ async fn compact_produces_brief_and_tail() {
     session.append_message(AgentMessage::User {
         content: "old ".repeat(200),
         ts: 1,
+        images: Vec::new(),
     });
     session.append_message(AgentMessage::User {
         content: "recent".into(),
         ts: 2,
+        images: Vec::new(),
     });
     let provider = MockProvider::new(vec![turn(
         vec![ContentBlock::Text {
@@ -534,7 +536,7 @@ async fn a_notice_arriving_mid_turn_reaches_the_very_next_sample() {
     .unwrap();
     // Bind the tool to the engine's own inbox, which only exists post-construction.
     let inbox = engine.notice_inbox();
-    engine.tools.push(Box::new(NotifyTool { inbox }));
+    engine.tools_mut().push(Box::new(NotifyTool { inbox }));
 
     let mut sink = NoteSink(vec![]);
     engine.run_turn("spawn something", &mut sink).await.unwrap();
@@ -615,12 +617,14 @@ async fn sync_subagent_gives_up_and_points_at_the_notice() {
     let tmp = tempfile::tempdir().unwrap();
     let mut engine = engine_in(tmp.path(), subagent_script(), Box::new(AllowGate));
     // A child that never finishes, with a wait short enough to test.
-    engine.tools.retain(|t| {
+    engine.tools_mut().retain(|t| {
         t.spec().name != harness_core::engine::GOAL_COMPLETE_TOOL && t.spec().name != "subagent"
     });
-    engine.tools.push(Box::new(harness_tools::SubagentTool {
-        wait: std::time::Duration::from_millis(80),
-    }));
+    engine
+        .tools_mut()
+        .push(Box::new(harness_tools::SubagentTool {
+            wait: std::time::Duration::from_millis(80),
+        }));
     engine.set_bus(Arc::new(MockBus::with_child(child(
         ChildStatus::Running,
         "",

@@ -21,8 +21,9 @@ impl Tool for ReadTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: READ_TOOL_NAME.into(),
-            description: "Read a text file from the project. Returns a numbered line window; \
-                          large files get a pointer to a stored full copy."
+            description: "Read a file from the project. Text comes back as a numbered line \
+                          window (large files get a pointer to a stored full copy); PNG, JPEG, GIF \
+                          and WebP images are shown to you as images; a directory is listed."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -57,6 +58,13 @@ impl Tool for ReadTool {
             Ok(b) => b,
             Err(e) => return ToolOutput::error(e.to_string()),
         };
+        // Images are shown to the model rather than refused as binary.
+        if harness_core::image::sniff(&bytes).is_some() {
+            return match harness_core::image::from_bytes(bytes, &abs) {
+                Ok(img) => ToolOutput::text(format!("{path} ({})", img.media_type)).with_image(img),
+                Err(e) => ToolOutput::error(e),
+            };
+        }
         if bytes.iter().take(8192).any(|&b| b == 0) {
             return ToolOutput::error(format!(
                 "{path} looks binary ({} bytes); not shown as text",
@@ -511,5 +519,20 @@ mod tests {
                 .unwrap_err()
                 .contains("not found")
         );
+    }
+
+    #[tokio::test]
+    async fn read_returns_images_as_images() {
+        let tmp = tempfile::tempdir().unwrap();
+        let png = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0];
+        std::fs::write(tmp.path().join("shot.png"), png).unwrap();
+        let mut gate = AllowGate;
+        let mut ctx = ctx_in(tmp.path(), &mut gate);
+        let out = ReadTool
+            .execute(json!({"path": "shot.png"}), &mut ctx)
+            .await;
+        assert!(!out.is_error, "{}", out.content);
+        assert_eq!(out.images.len(), 1);
+        assert_eq!(out.images[0].media_type, "image/png");
     }
 }

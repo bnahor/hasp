@@ -101,9 +101,12 @@ pub fn prune_stale(messages: &mut [AgentMessage]) {
         .collect();
     for i in tool_idx {
         if !keep.contains(&i)
-            && let AgentMessage::ToolResult { content, .. } = &mut messages[i]
+            && let AgentMessage::ToolResult {
+                content, images, ..
+            } = &mut messages[i]
         {
             *content = CLEARED_MARKER.to_string();
+            images.clear();
         }
     }
 }
@@ -148,6 +151,7 @@ mod tests {
         sess.append_message(crate::AgentMessage::User {
             content: "hi".into(),
             ts: 0,
+            images: Vec::new(),
         });
         let a = assemble(&sess, &[]);
         let b = assemble(&sess, &[]);
@@ -197,6 +201,7 @@ mod tests {
                 content: format!("payload {i}"),
                 is_error: false,
                 ts: i,
+                images: Vec::new(),
             });
         }
         messages.push(crate::AgentMessage::ToolResult {
@@ -205,6 +210,7 @@ mod tests {
             content: "precious".into(),
             is_error: false,
             ts: 99,
+            images: Vec::new(),
         });
         prune_stale(&mut messages);
         let read: Vec<&str> = messages

@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 futures-util.workspace = true
 regex = "1"
+base64 = "0.22"
 harness-workspace = { workspace = true }
 # Only for cron's localtime_r (already in the tree via tokio/mio).
 libc = "0.2"

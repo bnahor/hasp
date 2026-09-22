@@ -137,6 +137,7 @@ impl Tool for BashTool {
         ToolOutput {
             content,
             is_error: timed_out || !status.is_some_and(|s| s.success()),
+            images: Vec::new(),
         }
     }
 }

@@ -3,8 +3,10 @@
 //! tail persisted as a checkpoint entry. Booked as a cache *reset*, never a
 //! miss (research/01-source-notes.md §3.4, research/03-architecture.md §7).
 
-use crate::session::{SessionManager, now_ms};
-use crate::{AgentMessage, ContentBlock, ModelRequest, Provider, Sink, estimate_tokens};
+use crate::session::SessionManager;
+use crate::{
+    AgentMessage, AssistantTurn, ContentBlock, ModelRequest, Provider, Sink, estimate_tokens,
+};
 use anyhow::{Result, bail};
 
 pub const TAIL_TOKEN_BUDGET: u64 = 20_000;
@@ -35,7 +37,7 @@ pub struct CompactStats {
     pub retained_messages: usize,
 }
 
-struct Mute;
+pub struct Mute;
 
 impl Sink for Mute {
     fn on_delta(&mut self, _text: &str) {}
@@ -71,6 +73,28 @@ pub async fn compact_with_budget(
     tail_budget: u64,
     context_tokens: u64,
 ) -> Result<CompactStats> {
+    let plan = prepare(session, model, max_tokens, tail_budget, context_tokens)?;
+    let turn = provider.complete(&plan.request, &mut Mute).await?;
+    finish(plan, turn, session)
+}
+
+/// A compaction in two halves around the summary request, so a caller that
+/// shares the session (the daemon) need not hold it while the model writes.
+pub struct CompactionPlan {
+    pub request: ModelRequest,
+    tail: Vec<AgentMessage>,
+    tokens_before: u64,
+    /// Context length when planned; `finish` refuses if it moved.
+    messages_at_plan: usize,
+}
+
+pub fn prepare(
+    session: &SessionManager,
+    model: &str,
+    max_tokens: u32,
+    tail_budget: u64,
+    context_tokens: u64,
+) -> Result<CompactionPlan> {
     let messages = session.context_messages();
     let mut used: u64 = 0;
     let mut cut = 0;
@@ -85,20 +109,33 @@ pub async fn compact_with_budget(
         bail!("nothing to compact: history fits within the retained-tail budget");
     }
     let (older, tail) = messages.split_at(cut);
-    let tokens_before = context_tokens;
     let transcript = serialize(older);
-    let req = ModelRequest {
+    let request = ModelRequest {
         system: SUMMARIZER_SYSTEM.into(),
         tools: Vec::new(),
-        messages: vec![AgentMessage::User {
-            content: format!("{BRIEF_PROMPT}\n\n<transcript>\n{transcript}\n</transcript>"),
-            ts: now_ms(),
-        }],
+        messages: vec![AgentMessage::user(format!(
+            "{BRIEF_PROMPT}\n\n<transcript>\n{transcript}\n</transcript>"
+        ))],
         model: model.to_string(),
         max_tokens,
     };
-    let mut mute = Mute;
-    let turn = provider.complete(&req, &mut mute).await?;
+    Ok(CompactionPlan {
+        request,
+        tail: tail.to_vec(),
+        tokens_before: context_tokens,
+        messages_at_plan: messages.len(),
+    })
+}
+
+/// Apply a summary to the session the plan was made from.
+pub fn finish(
+    plan: CompactionPlan,
+    turn: AssistantTurn,
+    session: &mut SessionManager,
+) -> Result<CompactStats> {
+    if session.context_messages().len() != plan.messages_at_plan {
+        bail!("the session changed while the summary was written; nothing was compacted");
+    }
     let summary = turn
         .blocks
         .iter()
@@ -112,11 +149,11 @@ pub async fn compact_with_budget(
         bail!("compaction produced an empty summary");
     }
     let stats = CompactStats {
-        tokens_before,
+        tokens_before: plan.tokens_before,
         summary_tokens: turn.usage.output,
-        retained_messages: tail.len(),
+        retained_messages: plan.tail.len(),
     };
-    session.append_compaction(summary, tokens_before, tail.to_vec());
+    session.append_compaction(summary, plan.tokens_before, plan.tail);
     Ok(stats)
 }
 
@@ -126,9 +163,14 @@ fn serialize(messages: &[AgentMessage]) -> String {
     let mut out = String::new();
     for m in messages {
         match m {
-            AgentMessage::User { content, .. } => {
+            AgentMessage::User {
+                content, images, ..
+            } => {
                 out.push_str("user: ");
                 out.push_str(content);
+                if !images.is_empty() {
+                    out.push_str(&format!(" [{} image(s) attached]", images.len()));
+                }
                 out.push('\n');
             }
             AgentMessage::Assistant { content, .. } => {

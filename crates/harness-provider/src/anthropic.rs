@@ -117,6 +117,16 @@ impl Anthropic {
         (thinking, effort)
     }
 
+    /// Whether `model` on this endpoint takes images: every Claude model does;
+    /// DeepSeek's models are text-only; on z.ai only the `…v` vision models.
+    fn vision_for(&self, model: &str) -> bool {
+        match self.label {
+            "deepseek" => false,
+            "zai" => model.to_ascii_lowercase().ends_with('v'),
+            _ => true,
+        }
+    }
+
     /// Name the service behind an Anthropic-compatible endpoint.
     pub fn with_name(mut self, label: &'static str) -> Self {
         self.label = label;
@@ -178,11 +188,38 @@ impl ClaudeCaps {
     }
 }
 
-fn tool_result_block(m: &AgentMessage) -> Value {
+fn image_block(img: &harness_core::Image) -> Value {
+    json!({
+        "type": "image",
+        "source": {"type": "base64", "media_type": img.media_type, "data": img.data},
+    })
+}
+
+/// Text followed by images (or, for a model without vision, a placeholder
+/// saying they were left out). An empty text block is dropped — the API
+/// rejects those.
+fn content_blocks(text: &str, images: &[harness_core::Image], vision: bool) -> Vec<Value> {
+    let mut blocks = Vec::new();
+    let text = if !images.is_empty() && !vision {
+        format!("{text}\n{}", crate::omitted(images.len()))
+    } else {
+        text.to_string()
+    };
+    if !text.is_empty() || images.is_empty() {
+        blocks.push(json!({"type": "text", "text": text}));
+    }
+    if vision {
+        blocks.extend(images.iter().map(image_block));
+    }
+    blocks
+}
+
+fn tool_result_block(m: &AgentMessage, vision: bool) -> Value {
     let AgentMessage::ToolResult {
         tool_call_id,
         content,
         is_error,
+        images,
         ..
     } = m
     else {
@@ -191,7 +228,7 @@ fn tool_result_block(m: &AgentMessage) -> Value {
     json!({
         "type": "tool_result",
         "tool_use_id": tool_call_id,
-        "content": [{"type": "text", "text": content}],
+        "content": content_blocks(content, images, vision),
         "is_error": is_error,
     })
 }
@@ -204,7 +241,12 @@ fn tool_result_block(m: &AgentMessage) -> Value {
 /// was produced by the model being called. Another model cannot verify the
 /// signature, so for it the block is left out (what every provider expects
 /// after a model switch).
+#[cfg(test)]
 fn map_messages(messages: &[AgentMessage], model: &str) -> Vec<Value> {
+    map_messages_with(messages, model, true)
+}
+
+fn map_messages_with(messages: &[AgentMessage], model: &str, vision: bool) -> Vec<Value> {
     let mut out: Vec<Value> = Vec::new();
     let mut open_results: Option<usize> = None;
     for m in messages {
@@ -213,9 +255,9 @@ fn map_messages(messages: &[AgentMessage], model: &str) -> Vec<Value> {
                 Some(i) => out[i]["content"]
                     .as_array_mut()
                     .expect("tool_result message holds an array")
-                    .push(tool_result_block(m)),
+                    .push(tool_result_block(m, vision)),
                 None => {
-                    out.push(json!({"role": "user", "content": [tool_result_block(m)]}));
+                    out.push(json!({"role": "user", "content": [tool_result_block(m, vision)]}));
                     open_results = Some(out.len() - 1);
                 }
             },
@@ -260,9 +302,13 @@ fn map_messages(messages: &[AgentMessage], model: &str) -> Vec<Value> {
                     out.push(json!({"role": "assistant", "content": blocks}));
                 }
             }
-            AgentMessage::User { content, .. } => {
+            AgentMessage::User {
+                content, images, ..
+            } => {
                 open_results = None;
-                out.push(json!({"role": "user", "content": [{"type": "text", "text": content}]}));
+                out.push(
+                    json!({"role": "user", "content": content_blocks(content, images, vision)}),
+                );
             }
         }
     }
@@ -283,7 +329,7 @@ fn mark_cache_point(message: &mut Value) {
 
 #[cfg(test)]
 pub(crate) fn build_body(req: &ModelRequest) -> Value {
-    build_body_with(req, None, None)
+    build_body_with(req, None, None, true)
 }
 
 /// Four breakpoints, the API maximum: tools, system, and two on the
@@ -297,6 +343,7 @@ pub(crate) fn build_body_with(
     req: &ModelRequest,
     thinking: Option<&Value>,
     effort: Option<&str>,
+    vision: bool,
 ) -> Value {
     let mut tools: Vec<Value> = req
         .tools
@@ -306,7 +353,7 @@ pub(crate) fn build_body_with(
     if let Some(last) = tools.last_mut() {
         last["cache_control"] = json!({"type": "ephemeral"});
     }
-    let mut messages = map_messages(&req.messages, &req.model);
+    let mut messages = map_messages_with(&req.messages, &req.model, vision);
     let n = messages.len();
     if n >= 1 {
         mark_cache_point(&mut messages[n - 1]);
@@ -396,7 +443,12 @@ impl Provider for Anthropic {
         sink: &mut dyn Sink,
     ) -> Result<AssistantTurn, ProviderError> {
         let (thinking, effort) = self.reasoning_for(&req.model);
-        let body = build_body_with(req, thinking.as_ref(), effort.as_deref());
+        let body = build_body_with(
+            req,
+            thinking.as_ref(),
+            effort.as_deref(),
+            self.vision_for(&req.model),
+        );
         // Retried only here, before anything has reached the sink: a turn that
         // already streamed text cannot be un-streamed.
         let resp = crate::retry::send_retrying(self.retry_base_ms, || {
@@ -589,6 +641,7 @@ mod tests {
             content: "ok".into(),
             is_error: false,
             ts: 2,
+            images: Vec::new(),
         }
     }
 
@@ -600,6 +653,7 @@ mod tests {
             AgentMessage::User {
                 content: "go".into(),
                 ts: 0,
+                images: Vec::new(),
             },
             assistant(vec![
                 ContentBlock::ToolCall {
@@ -618,6 +672,7 @@ mod tests {
             AgentMessage::User {
                 content: "next".into(),
                 ts: 3,
+                images: Vec::new(),
             },
         ];
 
@@ -676,6 +731,7 @@ mod tests {
                 AgentMessage::User {
                     content: "hi".into(),
                     ts: 0,
+                    images: Vec::new(),
                 },
                 AgentMessage::Assistant {
                     content: vec![
@@ -701,6 +757,7 @@ mod tests {
                     content: "out".into(),
                     is_error: false,
                     ts: 2,
+                    images: Vec::new(),
                 },
             ],
             model: "m".into(),
@@ -769,6 +826,7 @@ mod tests {
         let mut messages = vec![AgentMessage::User {
             content: "go".into(),
             ts: 0,
+            images: Vec::new(),
         }];
         for id in ["a", "b"] {
             messages.push(assistant(vec![ContentBlock::ToolCall {
@@ -825,7 +883,7 @@ mod tests {
         };
         let body_for = |c: &Anthropic, model: &str| {
             let (t, e) = c.reasoning_for(model);
-            build_body_with(&req(model), t.as_ref(), e.as_deref())
+            build_body_with(&req(model), t.as_ref(), e.as_deref(), true)
         };
         // One client, switched between models mid-session.
         let c = Anthropic::new("k".into(), "claude-opus-5".into()).with_reasoning(Some("xhigh"));
@@ -854,5 +912,57 @@ mod tests {
         assert_eq!(parse_tool_input(r#"{"path":"a"}"#), json!({"path": "a"}));
         let cut = parse_tool_input(r#"{"path":"a","content":"hal"#);
         assert!(cut[harness_core::INVALID_INPUT_KEY].is_string());
+    }
+
+    fn png() -> harness_core::Image {
+        harness_core::Image {
+            media_type: "image/png".into(),
+            data: "iVBORw0KGgo=".into(),
+        }
+    }
+
+    #[test]
+    fn images_ride_in_user_messages_and_tool_results_or_become_placeholders() {
+        let messages = vec![
+            AgentMessage::User {
+                content: "what is this?".into(),
+                ts: 0,
+                images: vec![png()],
+            },
+            assistant(vec![ContentBlock::ToolCall {
+                id: "a".into(),
+                name: "read".into(),
+                arguments: json!({"path": "x.png"}),
+            }]),
+            AgentMessage::ToolResult {
+                tool_call_id: "a".into(),
+                tool_name: "read".into(),
+                content: "x.png".into(),
+                is_error: false,
+                ts: 2,
+                images: vec![png()],
+            },
+        ];
+        let wire = map_messages_with(&messages, "m", true);
+        let user = wire[0]["content"].as_array().unwrap();
+        assert_eq!(user[0]["type"], "text");
+        assert_eq!(user[1]["type"], "image");
+        assert_eq!(user[1]["source"]["media_type"], "image/png");
+        let result = &wire[2]["content"][0]["content"];
+        assert_eq!(result[1]["type"], "image");
+
+        let blind = map_messages_with(&messages, "m", false);
+        let text = Value::Array(blind).to_string();
+        assert!(
+            !text.contains("iVBOR"),
+            "no image data to a text-only model"
+        );
+        assert!(text.contains("image(s) omitted"));
+
+        let c = Anthropic::new("k".into(), "deepseek-v4-pro".into()).with_name("deepseek");
+        assert!(!c.vision_for("deepseek-v4-pro"));
+        let c = Anthropic::new("k".into(), "glm-4.6".into()).with_name("zai");
+        assert!(!c.vision_for("glm-4.6") && c.vision_for("glm-4.5v"));
+        assert!(Anthropic::new("k".into(), "claude-opus-5".into()).vision_for("claude-opus-5"));
     }
 }

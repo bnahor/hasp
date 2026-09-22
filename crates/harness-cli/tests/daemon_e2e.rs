@@ -1276,3 +1276,118 @@ async fn both_attached_clients_see_the_turn_stream() {
 
     let _ = child.kill().await;
 }
+
+/// The engine lock is not held across provider I/O: stats and rename requests
+/// answer while a slow turn is in flight, and a request that would restructure
+/// the session under the turn is refused instead of queueing behind it.
+#[tokio::test]
+async fn requests_answer_while_a_slow_turn_is_in_flight() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut child = spawn_daemon(tmp.path(), &[("HARNESS_MOCK_DELAY_MS", "3000")]).await;
+    let sock = tmp.path().join("d.sock");
+    let stream = UnixStream::connect(&sock).await.unwrap();
+    let (rd, mut wr) = stream.into_split();
+    let mut rd = BufReader::new(rd);
+
+    async fn send(
+        wr: &mut tokio::net::unix::OwnedWriteHalf,
+        id: u64,
+        method: &str,
+        params: serde_json::Value,
+    ) {
+        let line = encode(&Wire::request(id, method, params));
+        wr.write_all(line.as_bytes()).await.unwrap();
+        wr.flush().await.unwrap();
+    }
+
+    /// Next response of any id: `(id, Ok(result) | Err(message))`.
+    async fn next_response(
+        rd: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
+    ) -> (u64, Result<serde_json::Value, String>) {
+        loop {
+            let mut line = String::new();
+            assert!(rd.read_line(&mut line).await.unwrap() > 0, "daemon closed");
+            if let Some(Wire::Response { id, result, error }) = decode(&line) {
+                return (
+                    id,
+                    match error {
+                        Some(e) => Err(e.message),
+                        None => Ok(result.unwrap_or_default()),
+                    },
+                );
+            }
+        }
+    }
+
+    send(
+        &mut wr,
+        1,
+        METHOD_INITIALIZE,
+        serde_json::json!({"client": "t"}),
+    )
+    .await;
+    assert_eq!(next_response(&mut rd).await.0, 1);
+    send(
+        &mut wr,
+        2,
+        METHOD_SESSION_CONTINUE,
+        serde_json::json!({"cwd": tmp.path().to_string_lossy()}),
+    )
+    .await;
+    assert_eq!(next_response(&mut rd).await.0, 2);
+
+    send(
+        &mut wr,
+        3,
+        METHOD_SESSION_PROMPT,
+        serde_json::json!({"prompt": "slow"}),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await; // the turn is now mid-sample
+    let t = std::time::Instant::now();
+    send(&mut wr, 4, METHOD_SESSION_STATS, serde_json::json!({})).await;
+    send(
+        &mut wr,
+        5,
+        harness_wire::METHOD_SESSION_NAME,
+        serde_json::json!({"name": "renamed mid-turn"}),
+    )
+    .await;
+    send(
+        &mut wr,
+        6,
+        harness_wire::METHOD_SESSION_BRANCH,
+        serde_json::json!({"target": "nope"}),
+    )
+    .await;
+
+    let mut seen = Vec::new();
+    for _ in 0..3 {
+        seen.push(next_response(&mut rd).await);
+    }
+    assert!(
+        t.elapsed() < Duration::from_millis(1500),
+        "answered mid-turn, not after it: {:?}",
+        t.elapsed()
+    );
+    let ids: Vec<u64> = seen.iter().map(|(id, _)| *id).collect();
+    assert_eq!(ids, vec![4, 5, 6], "all three before the turn's own reply");
+    assert!(seen[0].1.as_ref().unwrap()["entries"].as_u64().unwrap() >= 1);
+    assert!(seen[1].1.is_ok());
+    assert!(
+        seen[2].1.as_ref().unwrap_err().contains("turn is running"),
+        "{:?}",
+        seen[2].1
+    );
+
+    let (id, turn) = next_response(&mut rd).await;
+    assert_eq!(id, 3);
+    assert_eq!(turn.unwrap()["text"], "echo: slow");
+
+    send(&mut wr, 7, METHOD_SHUTDOWN, serde_json::json!({})).await;
+    let _ = next_response(&mut rd).await;
+    tokio::time::timeout(Duration::from_secs(10), child.wait())
+        .await
+        .expect("daemon exits after shutdown")
+        .unwrap();
+}

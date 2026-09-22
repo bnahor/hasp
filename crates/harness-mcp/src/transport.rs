@@ -1,6 +1,6 @@
 //! stdio transport: spawn a server, handshake, route request/response by id.
 
-use crate::{McpServerConfig, initialize_params, render_content};
+use crate::{McpServerConfig, initialize_params};
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -148,9 +148,19 @@ impl McpClient {
     }
 
     pub async fn call_tool(&self, name: &str, args: Value) -> Result<(String, bool)> {
+        let (text, is_error, _) = self.call_tool_full(name, args).await?;
+        Ok((text, is_error))
+    }
+
+    /// `call_tool` plus any images the result carries.
+    pub async fn call_tool_full(
+        &self,
+        name: &str,
+        args: Value,
+    ) -> Result<(String, bool, Vec<harness_core::Image>)> {
         let result = self
             .request("tools/call", json!({"name": name, "arguments": args}))
             .await?;
-        Ok(render_content(&result))
+        Ok(crate::render_content_full(&result))
     }
 }

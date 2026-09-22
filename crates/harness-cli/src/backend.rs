@@ -3,9 +3,9 @@
 //! daemon defines — one code path in the TUI, and the engine implementation
 //! doubles as the reference for every response shape.
 
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, bail};
 use harness_core::Sink;
-use harness_core::engine::{Canceller, Engine, TurnSink};
+use harness_core::engine::{Canceller, Engine, TurnSink, post_turn_check_shared, run_turn_shared};
 use harness_core::session::SessionManager;
 use harness_core::{AgentMessage, ContentBlock};
 use harness_provider::catalog;
@@ -107,6 +107,10 @@ pub struct EngineBackend {
     event_tx: std::sync::mpsc::Sender<UiEvent>,
     canceller: Canceller,
     worktree_stack: Vec<(Workspace, String)>,
+    /// Held for a whole turn; the engine lock only for moments (see
+    /// `harness_core::engine`), so UI calls answer mid-turn instead of
+    /// freezing the interface until the model finishes.
+    turn: Arc<Mutex<()>>,
 }
 
 impl EngineBackend {
@@ -122,6 +126,7 @@ impl EngineBackend {
             event_tx,
             canceller,
             worktree_stack: Vec::new(),
+            turn: Arc::new(Mutex::new(())),
         }
     }
 }
@@ -130,15 +135,17 @@ impl Backend for EngineBackend {
     fn submit_prompt(&mut self, prompt: String) {
         self.canceller.reset();
         let engine = self.engine.clone();
+        let turn = self.turn.clone();
         let tx = self.event_tx.clone();
         self.handle.spawn(async move {
-            let mut eng = engine.lock().await;
+            let _turn = turn.lock().await;
+            let cell: &Mutex<Engine> = &engine;
             let mut sink = EventSink { tx: tx.clone() };
-            let mut res = eng.run_turn(&prompt, &mut sink).await;
+            let mut res = run_turn_shared(cell, &prompt, Vec::new(), &mut sink).await;
             // Goals and autonomous mode continue the work without a new prompt.
             while res.is_ok() {
-                match eng.post_turn_check(&mut sink).await {
-                    Some(cont) => res = eng.run_turn(&cont, &mut sink).await,
+                match post_turn_check_shared(cell, &mut sink).await {
+                    Some(cont) => res = run_turn_shared(cell, &cont, Vec::new(), &mut sink).await,
                     None => break,
                 }
             }
@@ -151,21 +158,11 @@ impl Backend for EngineBackend {
 
     fn submit_compact(&mut self) {
         let engine = self.engine.clone();
+        let turn = self.turn.clone();
         let tx = self.event_tx.clone();
         self.handle.spawn(async move {
-            let mut eng = engine.lock().await;
-            let model = eng.model.clone();
-            let max_tokens = eng.max_tokens;
-            let e: &mut Engine = &mut eng;
-            let est = e.context_est_tokens();
-            let res = harness_core::compaction::compact(
-                e.provider.as_ref(),
-                &model,
-                &mut e.session,
-                max_tokens,
-                est,
-            )
-            .await;
+            let _turn = turn.lock().await;
+            let res = harness_core::engine::compact_shared(&*engine).await;
             let _ = match res {
                 Ok(s) => tx.send(UiEvent::Done(Ok(DoneKind::Compact(s)))),
                 Err(e) => tx.send(UiEvent::Done(Err(e.to_string()))),
@@ -178,6 +175,20 @@ impl Backend for EngineBackend {
     }
 
     fn call(&mut self, method: &str, params: Value) -> Result<Value> {
+        // Requests that swap or rewind the session wait for no turn: they are
+        // refused while one runs, and hold the turn lock while they work.
+        let restructures = matches!(
+            method,
+            "session/new" | "session/load" | "session/worktree" | "session/worktree-exit"
+        ) || (method == "session/branch" && params["target"].is_string());
+        let _turn = if restructures {
+            match self.turn.clone().try_lock_owned() {
+                Ok(g) => Some(g),
+                Err(_) => bail!("a turn is running — wait for it, or cancel it (esc), then retry"),
+            }
+        } else {
+            None
+        };
         let mut eng = self.engine.blocking_lock();
         match method {
             "session/new" => {

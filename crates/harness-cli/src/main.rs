@@ -699,29 +699,14 @@ async fn plain_repl(
             "/help" => eprintln!(
                 "▪ /exit /new /name <text> /stats /model [id] /compact /branch [id] /fork /worktree /worktree-exit [rm] /goal <text>|status|pause|resume|clear [--budget N|--unlimited] /autonomous on|off [--max-turns N] [--max-tokens N] [--gate \"cmd\"] /resume [n]"
             ),
-            "/compact" => {
-                let mut eng = engine.lock().await;
-                let model = eng.model.clone();
-                let max_tokens = eng.max_tokens;
-                let e: &mut Engine = &mut eng;
-                let est = e.context_est_tokens();
-                match harness_core::compaction::compact(
-                    e.provider.as_ref(),
-                    &model,
-                    &mut e.session,
-                    max_tokens,
-                    est,
-                )
-                .await
-                {
-                    Ok(cs) => eprintln!(
-                        "▪ compacted ~{}k tokens → brief + {} retained message(s)",
-                        cs.tokens_before / 1000,
-                        cs.retained_messages
-                    ),
-                    Err(e) => eprintln!("error: {e}"),
-                }
-            }
+            "/compact" => match harness_core::engine::compact_shared(&*engine).await {
+                Ok(cs) => eprintln!(
+                    "▪ compacted ~{}k tokens → brief + {} retained message(s)",
+                    cs.tokens_before / 1000,
+                    cs.retained_messages
+                ),
+                Err(e) => eprintln!("error: {e}"),
+            },
             cmd if cmd == "/goal" || cmd.starts_with("/goal ") => {
                 let arg = cmd.trim_start_matches("/goal").trim();
                 let mut eng = engine.lock().await;

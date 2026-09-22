@@ -125,10 +125,11 @@ pub async fn serve() -> Result<()> {
                     }
                     None => ToolOutput::error(format!("unknown tool: {name}")),
                 };
-                Ok(json!({
-                    "content": [{"type": "text", "text": result.content}],
-                    "isError": result.is_error,
-                }))
+                let mut content = vec![json!({"type": "text", "text": result.content})];
+                content.extend(result.images.iter().map(
+                    |img| json!({"type": "image", "data": img.data, "mimeType": img.media_type}),
+                ));
+                Ok(json!({"content": content, "isError": result.is_error}))
             }
             other => Err(format!("unknown method {other}")),
         };

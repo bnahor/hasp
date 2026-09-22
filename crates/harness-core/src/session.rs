@@ -388,6 +388,7 @@ impl SessionManager {
                     .into(),
                 is_error: true,
                 ts: now_ms(),
+                images: Vec::new(),
             });
         }
         repaired
@@ -745,6 +746,7 @@ impl SessionManager {
                             "[Continuation summary of earlier session history]\n\n{summary}"
                         ),
                         ts: *ts,
+                        images: Vec::new(),
                     });
                     out.extend(retained_tail.iter().cloned());
                 }
@@ -753,6 +755,7 @@ impl SessionManager {
                     out.push(AgentMessage::User {
                         content: format!("[Summary of the branch left behind]\n\n{summary}"),
                         ts: *ts,
+                        images: Vec::new(),
                     });
                 }
                 _ => {}
@@ -894,6 +897,7 @@ mod tests {
         AgentMessage::User {
             content: text.into(),
             ts: 1,
+            images: Vec::new(),
         }
     }
 
