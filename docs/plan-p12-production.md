@@ -1,6 +1,39 @@
 # P12 — the five remaining tranches
 
-Status: in progress (2026-09-20)
+Status: tranches 1, 3a and 5 COMPLETE (2026-09-20); 2, 3b and 4 remain
+
+Landed and verified:
+
+- **1. Robustness** — retry/backoff with `Retry-After` (before anything streams
+  only), stream stall guard, catalog staleness refresh, `harness sessions
+  [list|rm|prune]` with the live-resident guard, failing schedules backing off
+  (cron keeps its wall clock). 11 new tests, including two fake-endpoint tests
+  and one that a stray `content-length` would have made vacuous.
+- **3a. Fan-out** — `SharedClient` is a set now; every attached client gets the
+  turn stream and a permission question goes to all with first answer winning.
+  `both_attached_clients_see_the_turn_stream` proves a passive watcher is no
+  longer starved.
+- **5. CI** — `ci.yml` (fmt, clippy `-D warnings`, tests on macOS + Linux),
+  `release.yml` (tag → three targets + checksums), `install.sh`. clippy is now
+  genuinely clean (40 findings fixed, one of which — a no-op `ascii` branch in
+  the tool renderer — was silently doing nothing), so CI can enforce it.
+
+## Still open
+
+- **2. Engine lock across provider I/O.** `run_turn_loop` holds the engine lock
+  for a whole turn, so `/stats`, `/model` and goal changes queue behind a slow
+  model. The fix is a prepare → provider → apply split with `Engine::run_turn`
+  kept as a wrapper; it is a real refactor of the turn loop and was not started
+  rather than left half-done.
+- **3b. Strict ACP framing + TCP transport.** ACP works but is not
+  conformance-audited (`jsonrpc` is not validated, no `available_commands_update`,
+  client `fs/*` unused); the daemon is unix-socket only, so a TCP listener with a
+  required token is still missing.
+- **4. Sandbox and extension surface.** `HARNESS_SANDBOX` (sandbox-exec/bwrap
+  wrapping for bash) and project prompt templates in `.harness/commands/*.md`
+  are both unstarted — the largest remaining piece, and deliberately not
+  rushed.
+
 
 ## 1. Robustness (provider + schedules + sessions)
 

@@ -150,21 +150,24 @@ pub struct WirePrompt {
 /// One attached client: where a resident's turn output and permission
 /// questions go while it is connected.
 struct Attached {
-    id: u64,
     out: mpsc::UnboundedSender<String>,
     prompt: mpsc::UnboundedSender<WirePrompt>,
     session_id: String,
 }
 
-/// The client currently watching a resident session, if any.
+/// Everyone watching a resident session right now.
 ///
-/// A session outlives its clients, so this slot is simply empty when nobody is
+/// A session outlives its clients, so this map is empty when nobody is
 /// attached: turn updates are dropped (the journal stays canonical, so a later
-/// `session/load` returns everything) and an approval question is denied
-/// instead of blocking a worker on a client that no longer exists.
+/// `session/load` returns everything) and an approval question is denied rather
+/// than blocking a worker on a client that no longer exists.
+///
+/// Several clients may watch at once — attaching is not a takeover, so a TUI
+/// and a browser on the same session both see the turn stream — and a
+/// permission question goes to all of them, first answer winning.
 #[derive(Clone, Default)]
 struct SharedClient {
-    inner: Arc<std::sync::Mutex<Option<Attached>>>,
+    inner: Arc<std::sync::Mutex<HashMap<u64, Attached>>>,
 }
 
 impl SharedClient {
@@ -175,32 +178,29 @@ impl SharedClient {
         prompt: mpsc::UnboundedSender<WirePrompt>,
         session_id: String,
     ) {
-        *self.slot() = Some(Attached {
+        self.slot().insert(
             id,
-            out,
-            prompt,
-            session_id,
-        });
+            Attached {
+                out,
+                prompt,
+                session_id,
+            },
+        );
     }
 
-    /// Clears the slot only if `id` is still the attached client, so a client
-    /// that dies while another has already taken over cannot steal the slot.
     fn detach(&self, id: u64) {
-        let mut slot = self.slot();
-        if slot.as_ref().is_some_and(|a| a.id == id) {
-            *slot = None;
-        }
+        self.slot().remove(&id);
     }
 
     /// Follows a `/worktree` switch: later updates carry the new session id.
     fn set_session_id(&self, session_id: &str) {
-        if let Some(a) = self.slot().as_mut() {
+        for a in self.slot().values_mut() {
             a.session_id = session_id.to_string();
         }
     }
 
     fn update(&self, kind: &str, body: &str) {
-        if let Some(a) = self.slot().as_ref() {
+        for a in self.slot().values() {
             let _ = a
                 .out
                 .send(harness_wire::encode(&harness_wire::session_update(
@@ -212,14 +212,15 @@ impl SharedClient {
     }
 
     fn is_attached(&self) -> bool {
-        self.slot().is_some()
+        !self.slot().is_empty()
     }
 
-    fn prompt_sender(&self) -> Option<mpsc::UnboundedSender<WirePrompt>> {
-        self.slot().as_ref().map(|a| a.prompt.clone())
+    /// Every attached client's question channel: ask all, first answer wins.
+    fn prompt_senders(&self) -> Vec<mpsc::UnboundedSender<WirePrompt>> {
+        self.slot().values().map(|a| a.prompt.clone()).collect()
     }
 
-    fn slot(&self) -> std::sync::MutexGuard<'_, Option<Attached>> {
+    fn slot(&self) -> std::sync::MutexGuard<'_, HashMap<u64, Attached>> {
         self.inner.lock().expect("client slot")
     }
 }
@@ -261,15 +262,25 @@ impl WireGate {
     fn ask(client: &SharedClient, question: &str) -> char {
         // Nobody is attached to answer, so deny: blocking here would hold a
         // worker until a client that may never come back replies.
-        let Some(prompt) = client.prompt_sender() else {
+        let senders = client.prompt_senders();
+        if senders.is_empty() {
             return 'n';
-        };
+        }
+        // One response channel, cloned into every question: whoever answers
+        // first decides, and the others' answers land on a dropped sender.
         let (respond, rx) = std::sync::mpsc::channel();
-        let req = WirePrompt {
-            question: question.to_string(),
-            respond,
-        };
-        if prompt.send(req).is_err() {
+        let mut asked = 0;
+        for prompt in senders {
+            let req = WirePrompt {
+                question: question.to_string(),
+                respond: respond.clone(),
+            };
+            if prompt.send(req).is_ok() {
+                asked += 1;
+            }
+        }
+        drop(respond);
+        if asked == 0 {
             return 'n';
         }
         // The Gate trait is synchronous, so this necessarily blocks a worker

@@ -1175,3 +1175,104 @@ async fn cron_heartbeats_validate_and_list() {
     let _ = client.request(METHOD_SHUTDOWN, serde_json::json!({})).await;
     let _ = child.wait().await;
 }
+
+/// Two clients on one resident session: attaching is not a takeover, so both
+/// see the turn stream. Before fan-out the second client stole the stream and
+/// the first went silent.
+#[tokio::test]
+async fn both_attached_clients_see_the_turn_stream() {
+    use tokio::io::Lines;
+    use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
+
+    type Raw = (Lines<BufReader<OwnedReadHalf>>, OwnedWriteHalf);
+
+    async fn send(wr: &mut OwnedWriteHalf, msg: Wire) {
+        wr.write_all(encode(&msg).as_bytes()).await.unwrap();
+        wr.flush().await.unwrap();
+    }
+
+    /// Connect and open the workspace session over the raw wire, returning the
+    /// stream and the session id.
+    async fn open(sock: &std::path::Path, cwd: &str) -> (Raw, String) {
+        let stream = UnixStream::connect(sock).await.unwrap();
+        let (rd, mut wr) = stream.into_split();
+        let mut lines = BufReader::new(rd).lines();
+        send(
+            &mut wr,
+            Wire::request(1, METHOD_INITIALIZE, serde_json::json!({})),
+        )
+        .await;
+        send(
+            &mut wr,
+            Wire::request(2, METHOD_SESSION_CONTINUE, serde_json::json!({"cwd": cwd})),
+        )
+        .await;
+        loop {
+            let line = lines.next_line().await.unwrap().expect("a line");
+            if let Some(Wire::Response {
+                id: 2,
+                result: Some(r),
+                ..
+            }) = decode(&line)
+            {
+                let sid = r["sessionId"].as_str().expect("sessionId").to_string();
+                return ((lines, wr), sid);
+            }
+        }
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let mut child = spawn_daemon(tmp.path(), &[]).await;
+    let sock = tmp.path().join("d.sock");
+    let cwd = tmp.path().to_string_lossy().to_string();
+
+    let ((mut lines_a, mut wr_a), sid_a) = open(&sock, &cwd).await;
+    let ((mut lines_b, _wr_b), sid_b) = open(&sock, &cwd).await;
+    assert_eq!(sid_a, sid_b, "both clients are on the same session");
+
+    send(
+        &mut wr_a,
+        Wire::request(
+            3,
+            METHOD_SESSION_PROMPT,
+            serde_json::json!({"prompt": "fan out"}),
+        ),
+    )
+    .await;
+
+    let mut a_text = String::new();
+    loop {
+        let line = lines_a.next_line().await.unwrap().expect("a line");
+        match decode(&line) {
+            Some(Wire::Notification { method, params }) if method == "session/update" => {
+                if params["kind"] == "delta" {
+                    a_text.push_str(params["text"].as_str().unwrap_or_default());
+                }
+            }
+            Some(Wire::Response { id: 3, .. }) => break,
+            _ => {}
+        }
+    }
+    assert!(a_text.contains("echo: fan out"), "prompter saw: {a_text:?}");
+
+    // The second client asked for nothing, yet must receive the same stream.
+    let mut b_text = String::new();
+    let saw = tokio::time::timeout(Duration::from_secs(30), async {
+        while let Ok(Some(line)) = lines_b.next_line().await {
+            if let Some(Wire::Notification { method, params }) = decode(&line)
+                && method == "session/update"
+                && params["kind"] == "delta"
+            {
+                b_text.push_str(params["text"].as_str().unwrap_or_default());
+                if b_text.contains("echo: fan out") {
+                    return;
+                }
+            }
+        }
+    })
+    .await;
+    assert!(saw.is_ok(), "the watcher was starved: {b_text:?}");
+    assert!(b_text.contains("echo: fan out"), "watcher saw: {b_text:?}");
+
+    let _ = child.kill().await;
+}
