@@ -19,6 +19,7 @@ mod gate;
 mod highlight;
 mod markdown;
 mod mcp_server;
+mod theme;
 mod tui;
 
 use gate::{GateCore, PlainGate, TuiGate};
@@ -102,6 +103,78 @@ async fn main() -> Result<()> {
                 );
             }
             return self_update().await;
+        }
+        Some("export") => {
+            // The journal already is the portable format; export is stdout plus
+            // a choice of which session.
+            let ws = Workspace::resolve(&std::env::current_dir()?)?;
+            let mut list = SessionManager::list_for(&ws)?;
+            list.sort_by(|a, b| b.path.cmp(&a.path));
+            let target = match argv.get(1) {
+                Some(id) => list
+                    .iter()
+                    .find(|s| s.id.starts_with(id.as_str()))
+                    .with_context(|| format!("no session matching {id}"))?,
+                None => list.first().context("no sessions in this workspace")?,
+            };
+            use std::io::Write;
+            std::io::stdout().write_all(&std::fs::read(&target.path)?)?;
+            return Ok(());
+        }
+        Some("import") => {
+            let Some(src) = argv.get(1) else {
+                bail!("usage: harness import <file>");
+            };
+            let src = PathBuf::from(src);
+            let content =
+                std::fs::read(&src).with_context(|| format!("reading {}", src.display()))?;
+            let mut lines = content.split(|b| *b == b'\n').filter(|l| !l.is_empty());
+            let header: serde_json::Value =
+                serde_json::from_slice(lines.next().context("empty import file")?)
+                    .context("first line must be the session header")?;
+            if header["type"] != "session" {
+                bail!("first line is not a session header");
+            }
+            for (i, line) in lines.enumerate() {
+                serde_json::from_slice::<serde_json::Value>(line)
+                    .with_context(|| format!("entry {} is not JSON", i + 2))?;
+            }
+            // A session belongs to the workspace named in its header; placing
+            // it under that workspace's key is what makes `continue` find it.
+            let root = header["workspace"]["root"]
+                .as_str()
+                .context("header has no workspace root")?;
+            let key = if std::path::Path::new(root).exists() {
+                Workspace::resolve(std::path::Path::new(root))?.session_key()
+            } else {
+                // From another machine: keep the recorded key shape so it lands
+                // where that workspace would live if it existed here.
+                root.replace(['/', '\\'], "-")
+                    .trim_start_matches('-')
+                    .to_string()
+            };
+            let name = src
+                .file_name()
+                .context("import needs a file name")?
+                .to_string_lossy()
+                .to_string();
+            if !name.ends_with(".jsonl") {
+                bail!("import expects a .jsonl session file");
+            }
+            let dir = harness_workspace::sessions_root()?.join(key);
+            std::fs::create_dir_all(&dir)?;
+            let dest = dir.join(&name);
+            if dest.exists() {
+                bail!("a session already exists at {}", dest.display());
+            }
+            std::fs::write(&dest, &content)?;
+            // Full parse as the final gate — a file that loads is a session.
+            if let Err(e) = SessionManager::open(&dest) {
+                std::fs::remove_file(&dest)?;
+                bail!("imported file does not load as a session: {e}");
+            }
+            println!("imported {} → {}", src.display(), dest.display());
+            return Ok(());
         }
         Some("worktrees") => {
             let ws = Workspace::resolve(&std::env::current_dir()?)?;

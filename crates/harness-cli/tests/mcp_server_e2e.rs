@@ -27,7 +27,18 @@ async fn serves_the_tool_layer_with_the_same_confinement_and_policy() {
         .await
         .expect("connect to the harness MCP server");
     let names: Vec<&str> = client.tools.iter().map(|t| t.name.as_str()).collect();
-    assert_eq!(names, vec!["bash", "edit", "read", "write"], "sorted specs");
+    assert_eq!(
+        names,
+        vec![
+            "bash",
+            "edit",
+            "read",
+            "symbol_search",
+            "web_fetch",
+            "write"
+        ],
+        "sorted specs"
+    );
 
     // Read-only work is allowed.
     let (text, is_error) = client
@@ -66,6 +77,31 @@ async fn serves_the_tool_layer_with_the_same_confinement_and_policy() {
         .unwrap();
     assert!(is_error, "refused: {text}");
     assert!(!tmp.path().join("escaped.txt").exists());
+
+    // The symbol scan is served over MCP too — an external agent driving this
+    // harness gets the same code-intelligence surface our own agent has.
+    std::fs::write(tmp.path().join("lib.rs"), "pub fn alpha_target() {}\n").unwrap();
+    let (text, is_error) = client
+        .call_tool(
+            "symbol_search",
+            serde_json::json!({"query": "alpha_target"}),
+        )
+        .await
+        .unwrap();
+    assert!(!is_error, "{text}");
+    assert!(text.contains("lib.rs:1"), "{text}");
+    assert!(text.contains("alpha_target"), "{text}");
+
+    // The egress guard is structural: it holds here as it does in-process.
+    let (text, is_error) = client
+        .call_tool(
+            "web_fetch",
+            serde_json::json!({"url": "http://169.254.169.254/latest"}),
+        )
+        .await
+        .unwrap();
+    assert!(is_error, "metadata endpoint refused: {text}");
+    assert!(text.contains("local or private"), "{text}");
 
     // With the explicit opt-in the same tools mutate.
     let client = McpClient::connect("harness", &config(tmp.path(), &[("HARNESS_MCP_YOLO", "1")]))

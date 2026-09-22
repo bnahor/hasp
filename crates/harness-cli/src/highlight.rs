@@ -6,7 +6,7 @@
 //! keywords — so that is what this does, per language, with block-comment state
 //! carried across lines.
 
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::Span;
 
 #[derive(Clone, Copy)]
@@ -179,14 +179,13 @@ pub struct Palette {
 
 impl Palette {
     pub fn new(base: Style) -> Self {
+        let t = crate::theme::current();
         Self {
             base,
-            keyword: Style::new().fg(Color::Magenta),
-            string: Style::new().fg(Color::Green),
-            number: Style::new().fg(Color::Yellow),
-            comment: Style::new()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::ITALIC),
+            keyword: Style::new().fg(t.keyword),
+            string: Style::new().fg(t.string),
+            number: Style::new().fg(t.number),
+            comment: Style::new().fg(t.comment).add_modifier(Modifier::ITALIC),
         }
     }
 }

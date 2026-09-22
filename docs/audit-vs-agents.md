@@ -27,17 +27,17 @@ Legend: ✓ has it · ✗ does not · partial = has some of it.
 | MCP **server** mode | ✓ | ✗ | ✗ (serve is its own API, not MCP) | ✗ (goosed is REST) | ✗ |
 | provider breadth (incl. local/Ollama) | partial: 4 + any OpenAI-compat endpoint, no code change | ✓ local (multi) | ✓ local (`providers`) | ✓ docs (Ollama) | ✓ docs |
 | model catalog + live cost accounting | ✓ | ✓ local (catalogs) | ✓ local (`stats`) | ? | ✓ docs |
-| TUI | ✓ | ✓ local (very polished) | ✓ local | ✗ CLI+desktop docs | ? |
+| TUI | ✓ (light/dark themes) | ✓ local (very polished) | ✓ local | ✗ CLI+desktop docs | ? |
 | plain REPL / one-shot / `-p` | ✓ | ✓ local | ✓ local (`run`) | ✓ docs | ✓ docs |
 | web / desktop UI | ✗ | ✗ | ✓ local (`web`) | ✓ docs (desktop) | ✗ |
 | ACP (Agent Client Protocol) server | ✗ | ✗ | ✓ local (`acp`) | ✗ | ✗ |
 | extensions / plugins / skills | ✗ | ✓ local (extensions, themes, skills) | ✓ local (`plugin`) | ✓ docs (extensions= MCP, recipes) | ✓ docs (SDKs) |
 | shareable workflow packages | ✗ (goals are per-session) | ✗ | ✗ | ✓ docs (recipes: YAML) | ✓ docs (workflows) |
-| code-graph / code-intelligence index | ✗ (planned) | ✗ | ✓ docs (IDE-grade index claim) | ✗ | ✓ docs (CodeDB) |
+| code-graph / code-intelligence index | partial: on-demand symbol scan over MCP | ✗ | ✓ docs (IDE-grade index claim) | ✗ | ✓ docs (CodeDB) |
 | `@file` completion, syntax highlighting | ✓ | ✓ local | ✓ local | ? | ? |
-| web research tools built in | ✗ | ✗ | ✗ | ? | ✓ docs |
+| web research tools built in | ✓ (gated egress) | ✗ | ✗ | ? | ✓ docs |
 | GitHub/PR integration | ✗ | ✗ | ✓ local (`github`, `pr`) | ✗ | ✗ |
-| session export/import | ✗ (JSONL is open, no command) | ✗ | ✓ local (`export`/`import`, db) | ? | ? |
+| session export/import | ✓ | ✗ | ✓ local (`export`/`import`, db) | ? | ? |
 | self-update | ✗ (reinstall; documented) | ✓ local (`update self`) | ✓ local (`upgrade`) | ✓ docs (desktop) | ✓ docs (install.sh) |
 | install footprint / startup (measured here) | **6.5 MB · 3 ms · 16 MB RSS** | 434 MB pkg · 149 ms · 250 MB | 137 MB · 220 ms · 807 MB | n/a here | n/a here |
 

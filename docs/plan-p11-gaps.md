@@ -1,6 +1,6 @@
 # P11 — closing the audit gaps, in order
 
-Status: items 1–2 COMPLETE (2026-09-20); 3 onward next
+Status: items 1–6 COMPLETE (2026-09-20); ACP + web UI remain
 
 Item 1 verified three ways: unit + fake-endpoint e2e tests (fragmented tool
 deltas, usage, the 400-on-`stream_options` retry), live discovery against
@@ -46,7 +46,28 @@ command surface (plus what opencode charges for and we get free: portability).
 A palette struct behind the TUI's color choices, `HARNESS_THEME=light|dark` and
 `/theme`, with a light palette that keeps the markdown/highlight hierarchy.
 
-## 5–7 (this turn if budget allows, else next)
+## 3–6 — done
+
+- **export/import**: `harness export [id]` streams the journal, `harness import
+  <file>` validates every line, files the session under the workspace its header
+  names (path-derived key when that workspace only exists on another machine),
+  and refuses to overwrite. Covered by a round-trip test across two HOME states.
+- **themes**: one `Theme` struct feeds every content color (transcript kinds,
+  markdown, syntax, diffs); `/theme light|dark` switches at runtime and
+  `HARNESS_THEME` sets the default. Dark is byte-identical to the old look.
+- **web_fetch**: read-only research behind structural egress rules — http(s)
+  only, loopback/private/link-local/metadata names and IPs refused outright
+  (verified live: example.com fetched in 57 ms, `169.254.169.254` refused in
+  0 ms), body capped, big pages paged through the artifact store, HTML reduced
+  to readable text. Hostname-rebinding is a recorded limit; `bash` remains the
+  approval-gated egress path.
+- **symbol_search**: on-demand definition scan (Rust/Python/JS/TS/Go) with no
+  index to invalidate, ignore-aware, capped output. Live-verified through the
+  harness (`estimate_text_tokens` → `lib.rs:127` in 5 ms) and served over
+  `--mcp-serve`, so external agents get it too — the audit's "code-graph as
+  MCP" gap closed at scan fidelity, with a true graph still future work.
+
+## 7+ (remaining)
 
 Web research tool behind the existing gates · code-graph index served over our
 own MCP server · opencode UI portability assessment (short answer: their TUI is

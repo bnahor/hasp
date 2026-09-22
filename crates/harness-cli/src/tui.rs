@@ -99,6 +99,10 @@ const COMMANDS: &[(&str, &str)] = &[
     ),
     ("stats", "tokens, cache R/W, cost, context, entries"),
     (
+        "theme",
+        "color palette: light or dark (default dark; HARNESS_THEME too)",
+    ),
+    (
         "worktree",
         "isolate this session in a git worktree: /worktree [name]",
     ),
@@ -925,6 +929,30 @@ impl App {
                 self.current.clear();
             }
             "help" => self.footer.help_open = true,
+            "theme" => {
+                // A palette swap, not a redraw protocol: existing entries keep
+                // their spans, so re-render the transcript through the new one.
+                let t = match rest.trim() {
+                    "light" => crate::theme::Theme::light(),
+                    "dark" => crate::theme::Theme::dark(),
+                    "" => {
+                        self.push(
+                            format!(
+                                "▪ theme {} · /theme light|dark",
+                                crate::theme::current().name
+                            ),
+                            LineKind::Note,
+                        );
+                        return;
+                    }
+                    other => {
+                        self.push(format!("✗ unknown theme {other}"), LineKind::Error);
+                        return;
+                    }
+                };
+                crate::theme::set(t);
+                self.push(format!("▪ theme → {}", t.name), LineKind::Note);
+            }
             "stats" => {
                 self.refresh_footer();
                 let f = &self.footer;
@@ -1603,16 +1631,15 @@ fn tok(n: u64) -> String {
 }
 
 fn style_for(kind: LineKind) -> Style {
+    let t = crate::theme::current();
     match kind {
-        LineKind::User => Style::new().cyan().bold(),
+        LineKind::User => Style::new().fg(t.user).bold(),
         LineKind::Assistant => Style::new(),
         LineKind::Note => Style::new().dim(),
         LineKind::Error => Style::new().red(),
-        LineKind::Meta => Style::new().yellow(),
-        LineKind::Tool => Style::new().fg(Color::Gray),
-        LineKind::Thinking => Style::new()
-            .fg(Color::DarkGray)
-            .add_modifier(Modifier::ITALIC),
+        LineKind::Meta => Style::new().fg(t.meta),
+        LineKind::Tool => Style::new().fg(t.tool),
+        LineKind::Thinking => Style::new().fg(t.thinking).add_modifier(Modifier::ITALIC),
     }
 }
 
@@ -1622,12 +1649,13 @@ fn render_plain(text: &str, base: Style, ascii: bool) -> Vec<Line<'static>> {
     let prefix = if ascii { "  " } else { "  " };
     text.lines()
         .map(|l| {
+            let t = crate::theme::current();
             let styled = if l.starts_with("@@") {
-                Style::new().fg(Color::Cyan)
+                Style::new().fg(t.diff_hunk)
             } else if l.starts_with('+') {
-                Style::new().fg(Color::Green)
+                Style::new().fg(t.diff_add)
             } else if l.starts_with('-') {
-                Style::new().fg(Color::Red)
+                Style::new().fg(t.diff_del)
             } else {
                 base
             };

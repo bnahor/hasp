@@ -21,16 +21,15 @@ struct Styles {
 
 impl Styles {
     fn new(base: Style) -> Self {
+        let t = crate::theme::current();
         Self {
             base,
             dim: Style::new().fg(Color::DarkGray),
             heading: base.add_modifier(Modifier::BOLD),
-            heading1: Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-            code: Style::new().fg(Color::Rgb(180, 190, 170)),
-            inline_code: Style::new().fg(Color::Yellow),
-            quote: Style::new()
-                .fg(Color::Rgb(140, 150, 170))
-                .add_modifier(Modifier::ITALIC),
+            heading1: Style::new().fg(t.heading1).add_modifier(Modifier::BOLD),
+            code: Style::new().fg(t.code),
+            inline_code: Style::new().fg(t.inline_code),
+            quote: Style::new().fg(t.quote).add_modifier(Modifier::ITALIC),
         }
     }
 }

@@ -42,6 +42,7 @@ Inside the TUI:
 | `/compact`, `/branch [n]`, `/fork`, `/resume [n]` | context and session control |
 | `/worktree [name]`, `/worktree-exit [rm]` | isolate the session in a git worktree |
 | `/model [id]`, `/stats`, `/name <text>`, `/new`, `/clear`, `/exit` | the rest |
+| `/theme light\|dark` | color palette (`HARNESS_THEME` sets the default); dark is the historical look |
 
 Keys: `enter` send · `ctrl+j` newline · `esc` cancel a turn · `↑`/`↓` history ·
 `pgup`/`pgdn` scroll · `ctrl+c` exit.
@@ -49,7 +50,7 @@ Keys: `enter` send · `ctrl+j` newline · `esc` cancel a turn · `↑`/`↓` his
 ## Agent bus
 
 The model can spawn child agents with the `spawn` tool. Children get base tools
-only (read/write/edit/bash) — one level deep, by construction — and a child that
+only (read/write/edit/bash, plus the read-only `web_fetch` and `symbol_search`) — one level deep, by construction — and a child that
 declares `mutation: true` runs in its own git worktree (`harness/<name>`).
 Children never block the parent: exits arrive as notices between tool calls, and
 `message` supports follow-ups with `delivered`/`queued` receipts.
@@ -102,6 +103,10 @@ with `{"servers": {"harness": {"command": "…/harness", "args": ["--mcp-serve"]
   page back in with `read`.
 - `<project>/.harness/traces/*.jsonl` — per-turn API and tool timings.
 
+Sessions are portable by construction: `harness export [id] > file.jsonl` writes
+the journal as-is and `harness import file.jsonl` validates it and files it under
+the workspace its header names, so history resumes wherever it lands.
+
 ## Daemon
 
 The TUI attaches to a daemon by default, and sessions are **daemon-resident**: a
@@ -123,7 +128,8 @@ or `~/.harness/daemon.sock`.
 
 `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL`, `ZAI_API_KEY`, `DEEPSEEK_API_KEY`,
 `HARNESS_PROVIDER` (`anthropic` | `zai` | `deepseek` | `ollama` | `compat` |
-`mock`), `HARNESS_SOCKET`, `HARNESS_MOCK_DELAY_MS`.
+`mock`), `HARNESS_SOCKET`, `HARNESS_MOCK_DELAY_MS`, `HARNESS_THEME`
+(`dark` | `light`).
 
 **Any other model or vendor, with no code change**: `--provider compat` speaks
 the OpenAI wire format to whatever `HARNESS_COMPAT_URL` points at (plus optional

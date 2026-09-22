@@ -7,10 +7,14 @@ mod agent;
 mod bash;
 pub mod diff;
 mod fs;
+mod symbols;
+mod web;
 
 pub use agent::{AgentsTool, GoalCompleteTool, MessageTool, SpawnTool, SubagentTool};
 pub use bash::{BashTool, escapes_cwd, is_simple, seed_allowlist};
 pub use fs::{EditTool, ReadTool, WriteTool};
+pub use symbols::SymbolSearchTool;
+pub use web::WebFetchTool;
 
 use harness_core::Tool;
 
@@ -31,6 +35,9 @@ pub fn builtins_base() -> Vec<Box<dyn Tool>> {
         Box::new(WriteTool),
         Box::new(EditTool),
         Box::new(BashTool),
+        // Read-only extras: children and the MCP server get these too.
+        Box::new(WebFetchTool),
+        Box::new(SymbolSearchTool),
     ];
     tools.sort_by_key(|t| t.spec().name);
     tools
