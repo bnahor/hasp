@@ -26,6 +26,10 @@ pub struct Anthropic {
     /// the model-change journal record it, so it must not claim "anthropic"
     /// for a DeepSeek or z.ai endpoint.
     label: &'static str,
+    /// Retry cadence and mid-stream silence limit; injectable so tests need no
+    /// environment mutation (which is unsafe in this edition).
+    retry_base_ms: u64,
+    stall: Duration,
     client: reqwest::Client,
 }
 
@@ -37,6 +41,8 @@ impl Anthropic {
             base_url: "https://api.anthropic.com".into(),
             window: CONTEXT_WINDOW,
             label: "anthropic",
+            retry_base_ms: crate::retry::default_base_ms(),
+            stall: crate::retry::stall_timeout(),
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(600))
                 .build()
@@ -47,6 +53,18 @@ impl Anthropic {
     /// Anthropic-compatible endpoints (z.ai GLM, gateways, …).
     pub fn with_base_url(mut self, base_url: &str) -> Self {
         self.base_url = base_url.to_string();
+        self
+    }
+
+    /// Retry cadence for transient failures, and how long a silent stream may
+    /// stay silent.
+    pub fn with_retry_base(mut self, ms: u64) -> Self {
+        self.retry_base_ms = ms;
+        self
+    }
+
+    pub fn with_stall_timeout(mut self, stall: Duration) -> Self {
+        self.stall = stall;
         self
     }
 
@@ -211,20 +229,17 @@ impl Provider for Anthropic {
         req: &ModelRequest,
         sink: &mut dyn Sink,
     ) -> Result<AssistantTurn, ProviderError> {
-        let resp = self
-            .client
-            .post(format!("{}/v1/messages", self.base_url))
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", ANTHROPIC_VERSION)
-            .json(&build_body(req))
-            .send()
-            .await
-            .map_err(|e| ProviderError::Transport(e.to_string()))?;
-        let status = resp.status().as_u16();
-        if !resp.status().is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(ProviderError::Api { status, body });
-        }
+        let body = build_body(req);
+        // Retried only here, before anything has reached the sink: a turn that
+        // already streamed text cannot be un-streamed.
+        let resp = crate::retry::send_retrying(self.retry_base_ms, || {
+            self.client
+                .post(format!("{}/v1/messages", self.base_url))
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", ANTHROPIC_VERSION)
+                .json(&body)
+        })
+        .await?;
 
         let mut stream = resp.bytes_stream();
         let mut sse = SseParser::default();
@@ -234,9 +249,15 @@ impl Provider for Anthropic {
         let mut done = false;
 
         while !done {
-            let chunk = match stream.next().await {
-                Some(c) => c.map_err(|e| ProviderError::Transport(e.to_string()))?,
-                None => break,
+            let chunk = match tokio::time::timeout(self.stall, stream.next()).await {
+                Err(_) => {
+                    return Err(ProviderError::Transport(format!(
+                        "provider sent nothing for {}s — turn abandoned",
+                        self.stall.as_secs()
+                    )));
+                }
+                Ok(None) => break,
+                Ok(Some(c)) => c.map_err(|e| ProviderError::Transport(e.to_string()))?,
             };
             for data in sse.feed(&chunk) {
                 let ev: Value = serde_json::from_str(&data)

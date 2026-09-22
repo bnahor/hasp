@@ -82,6 +82,39 @@ pub fn load() -> Vec<ModelInfo> {
         .unwrap_or_else(fallback_catalog)
 }
 
+/// How old the stored catalog may get before startup refreshes it.
+const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 3600);
+
+fn is_stale_at(path: &std::path::Path) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return true;
+    };
+    meta.modified()
+        .ok()
+        .and_then(|m| m.elapsed().ok())
+        .is_none_or(|age| age > STALE_AFTER)
+}
+
+/// No stored catalog, or one old enough that ids and prices have moved.
+pub fn is_stale() -> bool {
+    catalog_path().map(|p| is_stale_at(&p)).unwrap_or(true)
+}
+
+/// Best-effort refresh at startup. The catalog feeds window sizes, cost
+/// reporting and `--model` validation, so it should not need remembering a
+/// command — but it must never block or fail a run, and offline simply keeps
+/// the stored copy. `HARNESS_OFFLINE=1` opts out.
+pub fn refresh_if_stale() {
+    if std::env::var("HARNESS_OFFLINE").is_ok() || !is_stale() {
+        return;
+    }
+    tokio::spawn(async {
+        if let Ok(models) = fetch_models_dev().await {
+            let _ = store(&models);
+        }
+    });
+}
+
 pub fn store(models: &[ModelInfo]) -> std::io::Result<PathBuf> {
     let path = catalog_path()?;
     std::fs::write(
@@ -156,6 +189,16 @@ pub fn cost_of(model: &ModelInfo, usage: &Usage) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn staleness_is_decided_by_presence_and_age() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("nope.json");
+        assert!(is_stale_at(&missing), "no catalog is stale");
+        let fresh = tmp.path().join("fresh.json");
+        std::fs::write(&fresh, "[]").unwrap();
+        assert!(!is_stale_at(&fresh), "a just-written catalog is current");
+    }
 
     #[test]
     fn parses_models_dev_shape() {

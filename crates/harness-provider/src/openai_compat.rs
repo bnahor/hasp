@@ -27,6 +27,8 @@ pub struct OpenAICompat {
     api_key: String,
     model: String,
     window: usize,
+    retry_base_ms: u64,
+    stall: std::time::Duration,
     client: reqwest::Client,
 }
 
@@ -44,10 +46,23 @@ impl OpenAICompat {
             api_key,
             model,
             window,
+            retry_base_ms: crate::retry::default_base_ms(),
+            stall: crate::retry::stall_timeout(),
             client: reqwest::Client::builder()
                 .build()
                 .expect("reqwest client builds"),
         }
+    }
+
+    /// Retry cadence and mid-stream silence limit, injectable for tests.
+    pub fn with_retry_base(mut self, ms: u64) -> Self {
+        self.retry_base_ms = ms;
+        self
+    }
+
+    pub fn with_stall_timeout(mut self, stall: std::time::Duration) -> Self {
+        self.stall = stall;
+        self
     }
 
     /// Ollama on localhost. Key is a placeholder — local servers ignore it —
@@ -273,23 +288,22 @@ impl Provider for OpenAICompat {
                 .post(self.url())
                 .header("authorization", format!("Bearer {}", self.api_key))
                 .json(&body)
-                .send()
         };
-        let mut resp = post(request_body(&self.model, req, true))
-            .await
-            .map_err(|e| ProviderError::Transport(e.to_string()))?;
-        if resp.status().as_u16() == 400 {
-            // Old servers reject `stream_options`; the request is identical
-            // without it, we just lose the usage chunk.
-            resp = post(request_body(&self.model, req, false))
-                .await
-                .map_err(|e| ProviderError::Transport(e.to_string()))?;
-        }
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(ProviderError::Api { status, body });
-        }
+        let with_usage = request_body(&self.model, req, true);
+        let resp = match crate::retry::send_retrying(self.retry_base_ms, || {
+            post(with_usage.clone())
+        })
+        .await
+        {
+            Ok(r) => r,
+            // Servers predating `stream_options` reject it with 400; the
+            // request is otherwise identical, we just lose the usage chunk.
+            Err(ProviderError::Api { status: 400, .. }) => {
+                let plain = request_body(&self.model, req, false);
+                crate::retry::send_retrying(self.retry_base_ms, || post(plain.clone())).await?
+            }
+            Err(e) => return Err(e),
+        };
 
         let mut stream = resp.bytes_stream();
         let mut text = String::new();
@@ -298,8 +312,17 @@ impl Provider for OpenAICompat {
         let mut finish: Option<String> = None;
         let mut usage = Usage::default();
         let mut buf = String::new();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| ProviderError::Transport(e.to_string()))?;
+        loop {
+            let chunk = match tokio::time::timeout(self.stall, stream.next()).await {
+                Err(_) => {
+                    return Err(ProviderError::Transport(format!(
+                        "endpoint sent nothing for {}s — turn abandoned",
+                        self.stall.as_secs()
+                    )));
+                }
+                Ok(None) => break,
+                Ok(Some(c)) => c.map_err(|e| ProviderError::Transport(e.to_string()))?,
+            };
             buf.push_str(&String::from_utf8_lossy(&chunk));
             // SSE events are newline-delimited and a chunk boundary can split
             // one, so only whole lines are consumed here.

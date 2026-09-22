@@ -7,6 +7,7 @@ pub mod deepseek;
 pub mod echo;
 pub mod mock;
 pub mod openai_compat;
+pub mod retry;
 pub mod zai;
 
 /// Providers whose model list is discovered from the endpoint at runtime

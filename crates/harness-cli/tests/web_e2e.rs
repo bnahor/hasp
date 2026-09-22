@@ -29,11 +29,11 @@ async fn http(port: u16, request: &str) -> (u16, String) {
     (status, body)
 }
 
-fn get(port: u16, path: &str) -> String {
+fn get(path: &str) -> String {
     format!("GET {path} HTTP/1.1\r\nhost: 127.0.0.1\r\nconnection: close\r\n\r\n")
 }
 
-fn post(port: u16, path: &str, body: &str) -> String {
+fn post(path: &str, body: &str) -> String {
     format!(
         "POST {path} HTTP/1.1\r\nhost: 127.0.0.1\r\ncontent-type: application/json\r\n\
          content-length: {}\r\nconnection: close\r\n\r\n{body}",
@@ -78,10 +78,10 @@ async fn serves_the_page_and_drives_a_turn() {
     let (mut child, port, token, _home) = start_web().await;
 
     // No token, no service — a local port is not an authorization.
-    let (status, _) = http(port, &get(port, "/")).await;
+    let (status, _) = http(port, &get("/")).await;
     assert_eq!(status, 401);
 
-    let (status, page) = http(port, &get(port, &format!("/?token={token}"))).await;
+    let (status, page) = http(port, &get(&format!("/?token={token}"))).await;
     assert_eq!(status, 200);
     assert!(page.contains("harness"), "the page is served");
     assert!(page.contains("composer"), "and it is the app, not a stub");
@@ -90,7 +90,6 @@ async fn serves_the_page_and_drives_a_turn() {
     let (status, body) = http(
         port,
         &post(
-            port,
             &format!("/rpc?token={token}"),
             &serde_json::json!({"method": "session/stats"}).to_string(),
         ),
@@ -105,7 +104,6 @@ async fn serves_the_page_and_drives_a_turn() {
     let (_, body) = http(
         port,
         &post(
-            port,
             &format!("/rpc?token={token}"),
             &serde_json::json!({"method": "session/prompt", "params": {"prompt": "hi web"}})
                 .to_string(),
@@ -126,7 +124,6 @@ async fn serves_the_page_and_drives_a_turn() {
     let (_, body) = http(
         port,
         &post(
-            port,
             &format!("/rpc?token={token}"),
             &serde_json::json!({"method": "session/history"}).to_string(),
         ),
@@ -153,7 +150,7 @@ async fn streams_assistant_deltas_over_sse() {
     // must arrive on the stream while the turn is still running.
     let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
     stream
-        .write_all(get(port, &format!("/events?token={token}")).as_bytes())
+        .write_all(get(&format!("/events?token={token}")).as_bytes())
         .await
         .unwrap();
     stream.flush().await.unwrap();
@@ -166,7 +163,7 @@ async fn streams_assistant_deltas_over_sse() {
 
     let prompt = serde_json::json!({"method": "session/prompt", "params": {"prompt": "stream me"}});
     let mut s2 = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
-    s2.write_all(post(port, &format!("/rpc?token={token}"), &prompt.to_string()).as_bytes())
+    s2.write_all(post(&format!("/rpc?token={token}"), &prompt.to_string()).as_bytes())
         .await
         .unwrap();
     s2.flush().await.unwrap();

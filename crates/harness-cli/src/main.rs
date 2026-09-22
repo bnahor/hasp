@@ -77,6 +77,7 @@ async fn main() -> Result<()> {
             return creds::login_interactive(provider);
         }
         Some("doctor") => return doctor().await,
+        Some("sessions") => return sessions_cmd(&argv[1..]).await,
         Some("web") => {
             let port: u16 = match argv.get(1) {
                 Some(p) => p.parse().context("port must be a number")?,
@@ -1061,6 +1062,152 @@ async fn list_models_cmd(provider: &str) -> Result<()> {
     );
     for m in &catalog {
         println!("  {:<36} {}k window", m.id, m.context_window / 1000);
+    }
+    Ok(())
+}
+
+/// Live daemon residents by session id — best effort: no daemon means no
+/// residents, and a daemon that does not answer promptly is not waited on.
+async fn live_resident_ids() -> Vec<String> {
+    let Ok(sock) = daemon::socket_path() else {
+        return Vec::new();
+    };
+    if !sock.exists() {
+        return Vec::new();
+    }
+    let Ok(Ok(mut client)) = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        harness_wire::WireClient::connect(&sock),
+    )
+    .await
+    else {
+        return Vec::new();
+    };
+    if client.initialize().await.is_err() {
+        return Vec::new();
+    }
+    match client
+        .request(harness_wire::METHOD_SESSION_RESIDENTS, json!({}))
+        .await
+    {
+        Ok(v) => v
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|r| r["sessionId"].as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
+fn human_age(created_ms: i64) -> String {
+    let mins = (harness_core::session::now_ms() - created_ms).max(0) / 60_000;
+    if mins < 60 {
+        format!("{mins}m")
+    } else if mins < 60 * 24 {
+        format!("{}h", mins / 60)
+    } else {
+        format!("{}d", mins / (60 * 24))
+    }
+}
+
+/// `--name value` or `--name=value`.
+fn flag_arg(args: &[String], name: &str) -> Option<String> {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if let Some(v) = a.strip_prefix(&format!("{name}=")) {
+            return Some(v.to_string());
+        }
+        if a == name {
+            return it.next().cloned();
+        }
+    }
+    None
+}
+
+/// `harness sessions [list | rm <id> | prune [--keep N] [--older-than 7d]]`
+///
+/// Journals are files nobody could clean up before this. Deletion refuses any
+/// session a live daemon holds: unlinking a file an appending daemon has open
+/// loses that data silently, which is exactly the failure this project refuses.
+async fn sessions_cmd(args: &[String]) -> Result<()> {
+    let ws = Workspace::resolve(&std::env::current_dir()?)?;
+    let mut list = SessionManager::list_for(&ws)?;
+    list.sort_by(|a, b| b.path.cmp(&a.path));
+    let live = live_resident_ids().await;
+    let held = |id: &str| live.iter().any(|l| l == id);
+    match args.first().map(String::as_str) {
+        None | Some("list") => {
+            if list.is_empty() {
+                println!("no sessions in this workspace");
+                return Ok(());
+            }
+            for s in &list {
+                let kb = std::fs::metadata(&s.path)
+                    .map(|m| m.len() / 1024)
+                    .unwrap_or(0);
+                println!(
+                    "{} {:<10} {:<18} {:>4} msgs {:>6} KB  {}",
+                    if held(&s.id) { "*" } else { " " },
+                    s.id,
+                    s.name.clone().unwrap_or_else(|| "-".into()),
+                    s.message_entries,
+                    kb,
+                    human_age(s.created_ms)
+                );
+            }
+            println!(
+                "\n* = held by a running daemon · sessions rm <id> · prune [--keep N] [--older-than 7d]"
+            );
+        }
+        Some("rm") => {
+            let Some(prefix) = args.get(1) else {
+                bail!("usage: harness sessions rm <id>");
+            };
+            let target = list
+                .iter()
+                .find(|s| s.id.starts_with(prefix.as_str()))
+                .with_context(|| format!("no session matching {prefix}"))?;
+            if held(&target.id) {
+                bail!(
+                    "session {} is open in a running daemon — `harness shutdown` first",
+                    target.id
+                );
+            }
+            std::fs::remove_file(&target.path)?;
+            println!("removed {} ({})", target.id, target.path.display());
+        }
+        Some("prune") => {
+            let keep: usize = flag_arg(args, "--keep")
+                .map(|v| v.parse())
+                .transpose()
+                .context("--keep needs a number")?
+                .unwrap_or(10);
+            let older_ms = match flag_arg(args, "--older-than") {
+                Some(d) => {
+                    Some(parse_duration_ms(&d).with_context(|| format!("bad duration {d}"))?)
+                }
+                None => None,
+            };
+            let now = harness_core::session::now_ms();
+            let mut removed = 0;
+            for (i, s) in list.iter().enumerate() {
+                let too_old = older_ms
+                    .map(|d| s.created_ms < now - d as i64)
+                    .unwrap_or(false);
+                let beyond_keep = older_ms.is_none() && i >= keep;
+                if !(too_old || beyond_keep) || held(&s.id) {
+                    continue;
+                }
+                std::fs::remove_file(&s.path)?;
+                println!("removed {} ({})", s.id, human_age(s.created_ms));
+                removed += 1;
+            }
+            println!("{removed} removed, {} kept", list.len() - removed);
+        }
+        Some(other) => bail!("unknown sessions subcommand: {other}"),
     }
     Ok(())
 }

@@ -221,12 +221,37 @@ fn local_offset_secs(secs: i64) -> i64 {
     }
 }
 
+/// Wait before retrying a schedule whose turns keep failing: doubling per
+/// consecutive failure and capped at an hour, so one broken schedule cannot
+/// spend all day at full rate. A success resets the count, so the next failure
+/// starts from the interval again.
+pub fn backoff_ms(failures: u32, interval_ms: u64) -> u64 {
+    let multiplier = 1u64 << failures.min(6);
+    interval_ms.saturating_mul(multiplier).min(3_600_000)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const HOUR: u64 = 3_600_000;
     const DAY: u64 = 86_400_000;
+
+    #[test]
+    fn failing_schedules_back_off_and_cap() {
+        assert_eq!(backoff_ms(0, 1_000), 1_000, "first failure: the interval");
+        assert_eq!(backoff_ms(1, 1_000), 2_000);
+        assert_eq!(backoff_ms(3, 1_000), 8_000);
+        // Doubling stops after six shifts, so a short interval tops out at
+        // 64x — the hour cap only bites for long ones.
+        assert_eq!(backoff_ms(20, 1_000), 64_000);
+        assert_eq!(
+            backoff_ms(20, 7_200_000),
+            3_600_000,
+            "a long interval is capped at an hour"
+        );
+        assert_eq!(backoff_ms(6, 120_000), 3_600_000, "cap binds here too");
+    }
 
     #[test]
     fn parses_the_common_forms() {

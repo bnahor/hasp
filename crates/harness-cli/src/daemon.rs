@@ -211,6 +211,10 @@ impl SharedClient {
         }
     }
 
+    fn is_attached(&self) -> bool {
+        self.slot().is_some()
+    }
+
     fn prompt_sender(&self) -> Option<mpsc::UnboundedSender<WirePrompt>> {
         self.slot().as_ref().map(|a| a.prompt.clone())
     }
@@ -348,6 +352,22 @@ struct HbRuntime {
     cron: Option<harness_core::cron::CronSpec>,
     paused: bool,
     next_due_ms: i64,
+    /// Consecutive failed turns, which stretch the next wait.
+    failures: u32,
+}
+
+/// Failure bookkeeping for one scheduled turn: a failure backs the next
+/// attempt off (doubling, capped) so a broken schedule cannot spend all day at
+/// full rate, and one success puts it back on its interval.
+fn apply_hb_outcome(rt: &mut HbRuntime, ok: bool, now_ms: i64) {
+    if ok {
+        rt.failures = 0;
+        return;
+    }
+    rt.failures = rt.failures.saturating_add(1);
+    if let Some(every) = rt.every_ms {
+        rt.next_due_ms = now_ms + harness_core::cron::backoff_ms(rt.failures, every) as i64;
+    }
 }
 
 /// First due time for a heartbeat armed or resumed at `now`. An interval adds
@@ -597,6 +617,7 @@ impl Handler {
                 }
             }
             harness_wire::METHOD_SESSION_PROMPT => self.prompt(id, params),
+            harness_wire::METHOD_SESSION_RESIDENTS => self.residents(id).await,
             harness_wire::METHOD_SESSION_COMPACT => self.compact(id),
             harness_wire::METHOD_HEARTBEAT_SET => self.heartbeat_set(id, params).await,
             harness_wire::METHOD_HEARTBEAT_LIST => self.heartbeat_list(id).await,
@@ -851,6 +872,7 @@ impl Handler {
                     every_ms: hb.every_ms,
                     cron,
                     paused: hb.paused,
+                    failures: 0,
                     next_due_ms,
                 },
             );
@@ -902,6 +924,25 @@ impl Handler {
 
     /// Releases the `Opening` claim when construction fails, so a later client
     /// can try again instead of finding a permanently busy workspace.
+    /// Which sessions a live daemon is holding. Answered from the registry, so
+    /// it stays responsive while a turn runs — callers use it to know what must
+    /// not be deleted out from under an appending journal.
+    async fn residents(&mut self, id: u64) {
+        let reg = self.registry.lock().await;
+        let list: Vec<serde_json::Value> = reg
+            .iter()
+            .filter_map(|(key, slot)| match slot {
+                ResidentSlot::Ready(r) => Some(serde_json::json!({
+                    "key": key,
+                    "sessionId": r.session_id(),
+                    "attached": r.client.is_attached(),
+                })),
+                ResidentSlot::Opening => None,
+            })
+            .collect();
+        self.reply(id, Ok(serde_json::Value::Array(list)));
+    }
+
     async fn fail_open(&mut self, id: u64, key: &str, error: String) {
         self.registry.lock().await.remove(key);
         self.reply(id, Err(RpcError::internal(error)));
@@ -992,7 +1033,7 @@ impl Handler {
         st.canceller.reset();
         let resident = st.clone();
         let out = self.out_tx.clone();
-        tokio::spawn(run_turn_loop(resident, prompt, Some((out, id))));
+        tokio::spawn(run_turn_loop(resident, prompt, Some((out, id)), None));
     }
 
     /// Heartbeat/one-shot delivery: fire a prompt with no RPC reply pending.
@@ -1070,6 +1111,7 @@ impl Handler {
                             cron: cron_spec,
                             paused: false,
                             next_due_ms: due,
+                            failures: 0,
                         },
                     );
                 }
@@ -1386,6 +1428,7 @@ async fn run_turn_loop(
     resident: Arc<Resident>,
     prompt: String,
     reply: Option<(mpsc::UnboundedSender<String>, u64)>,
+    hb: Option<String>,
 ) {
     let mut eng = resident.engine.lock().await;
     // Forwards to whichever client is attached, so a turn survives its client:
@@ -1400,6 +1443,8 @@ async fn run_turn_loop(
         }
     }
     let text = last_assistant_text(&eng.session);
+    // Captured before the reply is built, which moves `res`.
+    let ok = res.is_ok();
     match reply {
         Some((out, id)) => {
             let msg = match res {
@@ -1425,6 +1470,13 @@ async fn run_turn_loop(
             if let Err(e) = &res {
                 sink.on_note(&format!("✗ background turn failed: {e}"));
             }
+        }
+    }
+    // A scheduled turn's result feeds back into its own cadence.
+    if let Some(hb_id) = hb {
+        let mut hbs = resident.heartbeats.lock().await;
+        if let Some(rt) = hbs.get_mut(&hb_id) {
+            apply_hb_outcome(rt, ok, harness_core::session::now_ms());
         }
     }
 }
@@ -1478,7 +1530,8 @@ async fn heartbeat_loop(resident: Arc<Resident>) {
             if engine.try_lock().is_ok() {
                 // A due tick fires whether or not a client is attached: this is
                 // the whole point of a resident session.
-                tokio::spawn(run_turn_loop(resident.clone(), prompt, None));
+                let hb = id.clone();
+                tokio::spawn(run_turn_loop(resident.clone(), prompt, None, Some(hb)));
             } else {
                 // Coalesce: a slow turn must not accumulate a tick backlog.
                 let mut inbox = notice_inbox.lock().expect("notice inbox");
@@ -1487,5 +1540,48 @@ async fn heartbeat_loop(resident: Arc<Resident>) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hb(every_ms: u64) -> HbRuntime {
+        HbRuntime {
+            instruction: "tick".into(),
+            mode: "steer".into(),
+            every_ms: Some(every_ms),
+            cron: None,
+            paused: false,
+            next_due_ms: 0,
+            failures: 0,
+        }
+    }
+
+    #[test]
+    fn a_failing_schedule_backs_off_and_a_success_resets_it() {
+        let mut rt = hb(1_000);
+        let now = 10_000;
+        apply_hb_outcome(&mut rt, false, now);
+        assert_eq!(rt.failures, 1);
+        assert_eq!(rt.next_due_ms, now + 2_000, "the retry waits longer");
+        apply_hb_outcome(&mut rt, false, now);
+        assert_eq!(rt.next_due_ms, now + 4_000, "and longer again");
+        apply_hb_outcome(&mut rt, true, now);
+        assert_eq!(rt.failures, 0, "one success clears the count");
+    }
+
+    #[test]
+    fn cron_keeps_its_wall_clock_after_a_failure() {
+        // A daily 9am job must still run at 9am tomorrow; doubling a cron
+        // schedule would silently move it.
+        let mut rt = hb(0);
+        rt.every_ms = None;
+        rt.cron = harness_core::cron::parse("0 9 * * *").ok();
+        rt.next_due_ms = 123;
+        apply_hb_outcome(&mut rt, false, 10_000);
+        assert_eq!(rt.failures, 1);
+        assert_eq!(rt.next_due_ms, 123, "the occurrence is not stretched");
     }
 }

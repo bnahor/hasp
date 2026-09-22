@@ -20,6 +20,7 @@ pub const METHOD_SESSION_CANCEL: &str = "session/cancel";
 pub const METHOD_SESSION_NAME: &str = "session/name";
 pub const METHOD_SESSION_STATS: &str = "session/stats";
 pub const METHOD_SESSION_HISTORY: &str = "session/history";
+pub const METHOD_SESSION_RESIDENTS: &str = "session/residents";
 pub const METHOD_SESSION_LISTINGS: &str = "session/listings";
 pub const METHOD_SESSION_BRANCH: &str = "session/branch";
 pub const METHOD_SESSION_FORK: &str = "session/fork";
