@@ -29,8 +29,8 @@ Legend: ✓ has it · ✗ does not · partial = has some of it.
 | model catalog + live cost accounting | ✓ | ✓ local (catalogs) | ✓ local (`stats`) | ? | ✓ docs |
 | TUI | ✓ (light/dark themes) | ✓ local (very polished) | ✓ local | ✗ CLI+desktop docs | ? |
 | plain REPL / one-shot / `-p` | ✓ | ✓ local | ✓ local (`run`) | ✓ docs | ✓ docs |
-| web / desktop UI | ✗ | ✗ | ✓ local (`web`) | ✓ docs (desktop) | ✗ |
-| ACP (Agent Client Protocol) server | ✗ | ✗ | ✓ local (`acp`) | ✗ | ✗ |
+| web / desktop UI | ✓ (browser client) | ✗ | ✓ local (`web`) | ✓ docs (desktop) | ✗ |
+| ACP (Agent Client Protocol) server | ✓ | ✗ | ✓ local (`acp`) | ✗ | ✗ |
 | extensions / plugins / skills | ✗ | ✓ local (extensions, themes, skills) | ✓ local (`plugin`) | ✓ docs (extensions= MCP, recipes) | ✓ docs (SDKs) |
 | shareable workflow packages | ✗ (goals are per-session) | ✗ | ✗ | ✓ docs (recipes: YAML) | ✓ docs (workflows) |
 | code-graph / code-intelligence index | partial: on-demand symbol scan over MCP | ✗ | ✓ docs (IDE-grade index claim) | ✗ | ✓ docs (CodeDB) |
@@ -92,5 +92,6 @@ Legend: ✓ has it · ✗ does not · partial = has some of it.
 5. Web research tool (fetch + read) behind the same gates.
 6. Code-graph index served over our MCP server (planned; CodeDB-like).
 7. Extension surface beyond MCP — the genuinely large one.
-8. ACP server / web UI — protocol work; our daemon already speaks one wire
-   protocol, so ACP is a second front.
+8. ~~ACP server / web UI~~ **both landed 2026-09-20** (`docs/plan-p11-gaps.md`):
+   ACP on stdio for editors and a localhost browser client, each a thin front end
+   on the daemon rather than a second implementation.

@@ -1,6 +1,6 @@
 # P11 — closing the audit gaps, in order
 
-Status: items 1–6 COMPLETE (2026-09-20); ACP + web UI remain
+Status: COMPLETE (2026-09-20) — all eight items
 
 Item 1 verified three ways: unit + fake-endpoint e2e tests (fragmented tool
 deltas, usage, the 400-on-`stream_options` retry), live discovery against
@@ -67,7 +67,20 @@ A palette struct behind the TUI's color choices, `HARNESS_THEME=light|dark` and
   `--mcp-serve`, so external agents get it too — the audit's "code-graph as
   MCP" gap closed at scan fidelity, with a true graph still future work.
 
-## 7+ (remaining)
+## 7–8 — done
+
+- **ACP** (`harness --acp`): a translation layer over the daemon, so an editor
+  session inherits resident sessions, MCP tools, journals and gates. Streaming
+  updates, journal replay on `session/load`, and approvals as
+  `session/request_permission`. Covered by `acp_e2e`: a real turn through a real
+  editor-side client, a second turn on the same session, and an approval the
+  editor refuses (asserting the command did not run).
+- **Web UI** (`harness web [port]`): one embedded page, hand-rolled HTTP over a
+  daemon connection, SSE for streamed updates, token-guarded, localhost only.
+  Covered by `web_e2e`: 401 without the token, page served with it, a real prompt
+  through `/rpc`, history replay, and deltas arriving on the event stream while a
+  turn runs.
+
 
 Web research tool behind the existing gates · code-graph index served over our
 own MCP server · opencode UI portability assessment (short answer: their TUI is

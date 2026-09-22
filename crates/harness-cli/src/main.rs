@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use tui::UiEvent;
 
+mod acp;
 mod backend;
 mod creds;
 mod daemon;
@@ -21,6 +22,7 @@ mod markdown;
 mod mcp_server;
 mod theme;
 mod tui;
+mod web;
 
 use gate::{GateCore, PlainGate, TuiGate};
 
@@ -75,6 +77,13 @@ async fn main() -> Result<()> {
             return creds::login_interactive(provider);
         }
         Some("doctor") => return doctor().await,
+        Some("web") => {
+            let port: u16 = match argv.get(1) {
+                Some(p) => p.parse().context("port must be a number")?,
+                None => 0,
+            };
+            return web::serve(port).await;
+        }
         Some("models") => {
             let provider = argv
                 .get(1)
@@ -243,6 +252,7 @@ async fn main() -> Result<()> {
     let mut plain = false;
     let mut serve = false;
     let mut mcp_serve = false;
+    let mut acp_serve = false;
     let mut use_daemon = false;
     let mut no_daemon = false;
     let mut ascii = std::env::var("HARNESS_ASCII").is_ok();
@@ -261,6 +271,7 @@ async fn main() -> Result<()> {
             "--plain" => plain = true,
             "--serve" => serve = true,
             "--mcp-serve" => mcp_serve = true,
+            "--acp" => acp_serve = true,
             "--daemon" => use_daemon = true,
             "--provider" => provider_flag = Some(it.next().context("--provider needs a value")?),
             // embedded mode escape hatch (default is daemon-backed)
@@ -277,6 +288,10 @@ async fn main() -> Result<()> {
     }
     if mcp_serve {
         return mcp_server::serve().await;
+    }
+    if acp_serve {
+        // Editor-driven: ACP on stdio, our wire protocol to the daemon behind it.
+        return acp::serve().await;
     }
 
     let cwd = std::env::current_dir()?;

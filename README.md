@@ -22,6 +22,10 @@ harness                        # TUI (auto-spawns the daemon and attaches)
 harness --plain                # line REPL, embedded (no daemon)
 harness -p "explain src/lib.rs"  # one-shot, prints the answer
 harness --provider mock        # keyless: echoes prompts, for poking at the UI
+
+harness web                    # browser UI on 127.0.0.1 (prints a token URL)
+harness --acp                  # Agent Client Protocol on stdio — editors (Zed, …) drive it
+harness --mcp-serve            # serve the same tools over MCP on stdio
 ```
 
 The install command is the whole story: the root of this repo is a virtual
@@ -65,6 +69,22 @@ harness worktrees prune <name>         # refuses unmerged work; --force override
 
 The branch always survives a prune, so a forced cleanup is still recoverable with
 `git branch -D harness/<name>` once you are sure.
+
+## Editors and browsers
+
+Two more front ends speak to the same daemon, so neither reimplements anything:
+
+- **`harness --acp`** — Agent Client Protocol on stdio, for editors. `session/new`,
+  `session/load` (replays the journal), `session/prompt` (streaming
+  `agent_message_chunk` / `agent_thought_chunk` / `tool_call`), `session/cancel`,
+  and gate questions arrive as `session/request_permission` — an editor's refusal
+  is what the tool sees. Client-provided `fs/*` and `terminal/*` capabilities are
+  unused; the harness's own confined tools do that work.
+- **`harness web [port]`** — a localhost HTTP server serving one self-contained
+  page (no build step, no dependencies) that streams `session/update` over SSE and
+  sends commands to `/rpc`. One session per server, bound to the directory it was
+  started in, token-guarded so another tab cannot drive it. Approvals have nobody
+  to ask, so they are denied exactly as a detached daemon denies them.
 
 ## MCP servers
 

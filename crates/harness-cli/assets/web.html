@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>harness</title>
+<style>
+  :root {
+    --bg: #12140f; --panel: #191c15; --line: #2b2f24;
+    --fg: #d6d9cd; --dim: #7d8272; --accent: #9fd07a; --warn: #d0b070; --bad: #d08a7a;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 14px/1.55 var(--mono); display: flex; flex-direction: column; height: 100vh;
+  }
+  header {
+    display: flex; gap: 16px; align-items: baseline; padding: 10px 16px;
+    border-bottom: 1px solid var(--line); color: var(--dim); font-size: 12px;
+  }
+  header b { color: var(--accent); font-weight: 600; }
+  header .grow { flex: 1; }
+  header button {
+    background: none; border: 1px solid var(--line); color: var(--dim);
+    font: inherit; padding: 3px 8px; border-radius: 3px; cursor: pointer;
+  }
+  header button:hover { color: var(--fg); border-color: var(--dim); }
+  main { flex: 1; overflow-y: auto; padding: 16px; }
+  .turn { margin-bottom: 18px; }
+  .who { color: var(--dim); font-size: 12px; margin-bottom: 4px; }
+  .user .body { color: var(--fg); white-space: pre-wrap; }
+  .assistant .body { color: var(--fg); }
+  .assistant .body pre {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 4px;
+    padding: 10px; overflow-x: auto; margin: 8px 0; white-space: pre;
+  }
+  .thinking {
+    color: var(--dim); font-style: italic; border-left: 2px solid var(--line);
+    padding-left: 10px; margin: 6px 0; white-space: pre-wrap; font-size: 13px;
+  }
+  .tool {
+    display: flex; gap: 8px; align-items: baseline; margin: 6px 0;
+    color: var(--dim); font-size: 13px;
+  }
+  .tool .mark { color: var(--accent); }
+  .tool.bad .mark { color: var(--bad); }
+  .tool pre {
+    margin: 4px 0 0; color: var(--dim); background: var(--panel);
+    border-left: 2px solid var(--line); padding: 6px 10px; overflow-x: auto;
+    max-height: 260px; white-space: pre;
+  }
+  .note { color: var(--warn); font-size: 12px; margin: 6px 0; white-space: pre-wrap; }
+  .err { color: var(--bad); }
+  footer { border-top: 1px solid var(--line); padding: 10px 16px; }
+  textarea {
+    width: 100%; background: var(--panel); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 4px; font: inherit; padding: 10px; resize: vertical; min-height: 44px;
+    max-height: 40vh; outline: none;
+  }
+  textarea:focus { border-color: var(--dim); }
+  .hint { color: var(--dim); font-size: 11px; margin-top: 6px; display: flex; gap: 12px; }
+  .spin { color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <b>harness</b>
+  <span id="model">…</span>
+  <span id="ctx"></span>
+  <span class="grow"></span>
+  <span id="state">idle</span>
+  <button id="cancel" title="cancel the running turn">cancel</button>
+  <button id="clear" title="clear the view (journal keeps everything)">clear</button>
+</header>
+<main id="transcript"></main>
+<footer>
+  <textarea id="composer" rows="2" placeholder="Ask, or /help · Enter sends · Shift+Enter newline"></textarea>
+  <div class="hint">
+    <span>Enter send</span><span>Shift+Enter newline</span><span>Esc cancel</span>
+    <span id="tail"></span>
+  </div>
+</footer>
+<script>
+const token = new URLSearchParams(location.search).get("token") || "";
+const el = (id) => document.querySelector("#" + id);
+const transcript = el("transcript");
+let running = false, current = null, thinking = null;
+
+async function rpc(method, params = {}) {
+  const r = await fetch(`/rpc?token=${encodeURIComponent(token)}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ method, params }),
+  });
+  const j = await r.json();
+  if (!j.ok) throw new Error(j.error || "rpc failed");
+  return j.result;
+}
+
+function block(cls, parent) {
+  const d = document.createElement("div");
+  d.className = cls;
+  (parent || transcript).append(d);
+  return d;
+}
+function who(text, cls) {
+  const t = block("turn " + cls);
+  const w = document.createElement("div");
+  w.className = "who";
+  w.textContent = text;
+  t.append(w);
+  return t;
+}
+function scroll(force) {
+  const near = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 120;
+  if (force || near) transcript.scrollTop = transcript.scrollHeight;
+}
+
+/* Assistant text with fenced code preserved; everything through textContent so
+   model output can never become markup. */
+function renderText(target, text) {
+  target.textContent = "";
+  const parts = text.split(/```/);
+  parts.forEach((part, i) => {
+    if (i % 2 === 1) {
+      const pre = document.createElement("pre");
+      pre.textContent = part.replace(/^[a-zA-Z0-9+#-]*\n/, "");
+      target.append(pre);
+    } else if (part) {
+      const span = document.createElement("span");
+      span.textContent = part;
+      target.append(span);
+    }
+  });
+}
+
+function pushUser(text) {
+  const t = who("you", "user");
+  const b = block("body", t);
+  b.textContent = text;
+  scroll(true);
+}
+function assistantStart() {
+  const t = who("harness", "assistant");
+  const b = block("body", t);
+  b.textContent = "";
+  current = b;
+  thinking = null;
+  return t;
+}
+function note(text, bad) {
+  const d = block("note" + (bad ? " err" : ""));
+  d.textContent = text;
+  scroll();
+}
+function tool(event) {
+  const line = block("tool" + (event.is_error ? " bad" : ""));
+  const mark = document.createElement("span");
+  mark.className = "mark";
+  mark.textContent = event.is_error ? "✗" : "✓";
+  const name = document.createElement("span");
+  name.textContent = event.name + (event.args_preview ? ": " + event.args_preview : "");
+  line.append(mark, name);
+  if (event.content_preview) {
+    const pre = document.createElement("pre");
+    pre.textContent = event.content_preview;
+    const wrap = block("tool", null);
+    wrap.append(pre);
+  }
+  scroll();
+}
+
+function setState(s) {
+  running = s === "running";
+  el("state").textContent = s;
+  el("state").className = running ? "spin" : "";
+  el("composer").disabled = running;
+}
+
+function handle(ev) {
+  const params = ev.params || {};
+  if (params.kind === "delta") {
+    if (!current) assistantStart();
+    current.textContent += params.text || "";
+    scroll();
+  } else if (params.kind === "thinking") {
+    if (!thinking) {
+      thinking = block("thinking");
+      if (current && current.parentElement) current.parentElement.insertBefore(thinking, current);
+    }
+    thinking.textContent += params.text || "";
+    scroll();
+  } else if (params.kind === "tool") {
+    try { tool(JSON.parse(params.text)); } catch (_) { note(params.text); }
+  } else if (params.kind === "note") {
+    if (params.text && params.text.trim().startsWith("✗")) note(params.text, true);
+  }
+}
+
+async function loadHistory() {
+  try {
+    const h = await rpc("session/history");
+    for (const m of h.messages || []) {
+      if (!m.text) continue;
+      if (m.role === "user") pushUser(m.text);
+      else { const b = block("body", who("harness", "assistant")); renderText(b, m.text); }
+    }
+    scroll(true);
+  } catch (e) { note("history unavailable: " + e.message, true); }
+}
+
+async function refreshStats() {
+  try {
+    const s = await rpc("session/stats");
+    el("model").textContent = s.model || "";
+    const c = s.ctx || {};
+    el("ctx").textContent = `ctx ${c.measured ? "" : "~"}${Math.round((c.tokens || 0) / 1000)}k/${Math.round((s.window || 0) / 1000)}k · ${s.entries || 0} entries`;
+  } catch (_) {}
+}
+
+async function send() {
+  const box = el("composer");
+  const text = box.value.trim();
+  if (!text || running) return;
+  box.value = "";
+  if (text.startsWith("/")) {
+    try { await rpc("session/" + text.slice(1).replace(/ .*$/, ""), {}); } catch (e) { note(e.message, true); }
+    return;
+  }
+  pushUser(text);
+  const bubble = assistantStart();
+  setState("running");
+  try {
+    const r = await rpc("session/prompt", { prompt: text });
+    const final = (r && r.text) || "";
+    // Deltas built the bubble; if the stream dropped, the reply still lands.
+    if (final && bubble.textContent.trim() !== final.trim()) renderText(bubble, final);
+    if (r && r.aborted) note("turn cancelled");
+  } catch (e) {
+    note("turn failed: " + e.message, true);
+  } finally {
+    setState("idle");
+    refreshStats();
+    el("composer").focus();
+  }
+}
+
+el("composer").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+  if (e.key === "Escape" && running) cancel();
+});
+el("cancel").addEventListener("click", cancel);
+el("clear").addEventListener("click", () => { transcript.textContent = ""; });
+function cancel() { rpc("session/cancel").catch(() => {}); }
+
+function events() {
+  const es = new EventSource(`/events?token=${encodeURIComponent(token)}`);
+  es.onmessage = (m) => { try { handle(JSON.parse(m.data)); } catch (_) {} };
+  es.onerror = () => { el("tail").textContent = "stream reconnecting…"; };
+  es.onopen = () => { el("tail").textContent = ""; };
+}
+
+loadHistory();
+refreshStats();
+events();
+el("composer").focus();
+setInterval(refreshStats, 5000);
+</script>
+</body>
+</html>
