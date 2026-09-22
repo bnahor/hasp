@@ -43,7 +43,18 @@ pub fn escapes_cwd(cmd: &str) -> bool {
     })
 }
 
-pub struct BashTool;
+#[derive(Default)]
+pub struct BashTool {
+    jobs: std::sync::Arc<crate::jobs::JobTable>,
+}
+
+impl BashTool {
+    /// A bash tool whose background jobs land in `jobs` (shared with the
+    /// `job` tool that manages them).
+    pub fn with_jobs(jobs: std::sync::Arc<crate::jobs::JobTable>) -> Self {
+        Self { jobs }
+    }
+}
 
 #[async_trait]
 impl Tool for BashTool {
@@ -58,7 +69,8 @@ impl Tool for BashTool {
                 "type": "object",
                 "properties": {
                     "command": {"type": "string"},
-                    "timeout_ms": {"type": "integer", "description": "default 120000, max 600000"}
+                    "timeout_ms": {"type": "integer", "description": "default 120000, max 600000"},
+                    "background": {"type": "boolean", "description": "Start it as a background job and return at once (dev servers, watchers, long builds); manage it with the job tool"}
                 },
                 "required": ["command"]
             }),
@@ -77,6 +89,12 @@ impl Tool for BashTool {
         );
         if let GateDecision::Deny(reason) = ctx.gate.check_bash(cmd) {
             return ToolOutput::error(format!("command not approved: {reason}"));
+        }
+        if args["background"].as_bool().unwrap_or(false) {
+            return match self.jobs.start(cmd, ctx) {
+                Ok(msg) => ToolOutput::text(msg),
+                Err(e) => ToolOutput::error(e),
+            };
         }
         let mut command = crate::sandbox::command(cmd, ctx.workspace.root());
         command
@@ -268,13 +286,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut gate = AllowGate;
         let mut ctx = ctx_in(tmp.path(), &mut gate);
-        let out = BashTool
+        let out = BashTool::default()
             .execute(json!({"command": "printf 'hello'"}), &mut ctx)
             .await;
         assert!(!out.is_error, "{}", out.content);
         assert!(out.content.contains("hello"));
 
-        let fail = BashTool
+        let fail = BashTool::default()
             .execute(json!({"command": "exit 3"}), &mut ctx)
             .await;
         assert!(fail.is_error);
@@ -286,7 +304,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut gate = DenyGate;
         let mut ctx = ctx_in(tmp.path(), &mut gate);
-        let out = BashTool.execute(json!({"command": "ls"}), &mut ctx).await;
+        let out = BashTool::default()
+            .execute(json!({"command": "ls"}), &mut ctx)
+            .await;
         assert!(out.is_error);
         assert!(out.content.contains("not approved"));
     }
@@ -296,7 +316,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut gate = AllowGate;
         let mut ctx = ctx_in(tmp.path(), &mut gate);
-        let out = BashTool
+        let out = BashTool::default()
             .execute(
                 json!({"command": "seq 1 20000", "timeout_ms": 30000}),
                 &mut ctx,
@@ -318,7 +338,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut gate = AllowGate;
         let mut ctx = ctx_in(tmp.path(), &mut gate);
-        let out = BashTool
+        let out = BashTool::default()
             .execute(json!({"command": "printf 'ok\\377done'"}), &mut ctx)
             .await;
         assert!(
@@ -327,7 +347,7 @@ mod tests {
             out.content
         );
 
-        let out = BashTool
+        let out = BashTool::default()
             .execute(
                 json!({"command": "echo started; sleep 5", "timeout_ms": 300}),
                 &mut ctx,

@@ -33,6 +33,7 @@ async fn serves_the_tool_layer_with_the_same_confinement_and_policy() {
             "edit",
             "glob",
             "grep",
+            "job",
             "read",
             "symbol_search",
             "web_fetch",

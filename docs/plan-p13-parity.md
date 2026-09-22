@@ -45,12 +45,30 @@ clean. Verified live on DeepSeek V4 Pro (no Anthropic key on this machine; see
 - No agentic benchmark (SWE-bench Verified / Terminal-Bench) has been run; the
   harness-quality claims above are from targeted tests and two live runs.
 
+## Landed 2026-09-23, second pass
+
+- **Engine lock across provider I/O (P12 tranche 2)** — fixed. `run_turn_shared`
+  / `post_turn_check_shared` / `compact_shared` lock only for state changes; a
+  per-session turn lock serializes turns (daemon and embedded backend). The
+  embedded TUI no longer blocks its UI thread on `blocking_lock` mid-turn.
+  Structural requests during a turn are refused (`TURN_BUSY`), never queued
+  behind it. Acceptance test: `requests_answer_while_a_slow_turn_is_in_flight`
+  (stats + rename answer within 1.5 s of a 3 s mock turn; `/branch` refused).
+- **Images** — `Image` on user messages and tool results (inline base64,
+  serde-default so old journals load); prompt attachments; `read`; MCP both
+  directions; ACP image blocks (`promptCapabilities.image: true`); Anthropic
+  and OpenAI-compatible wire formats; placeholder for text-only models.
+  Verified live: image journaled, DeepSeek answered via placeholder + tools.
+  **Not** verified live on a vision model: no Anthropic key, z.ai quota spent.
+- **Background jobs** — `bash background: true` + `job` tool; process-group
+  kill on `kill` and on session drop; 8-job cap. Verified live (model ran a
+  server as a job, fetched from it, killed it; port free afterwards).
+- Fixed on the way: the OpenAI-compatible provider ignored `/model`; a
+  pre-existing race in `retries_without_stream_options_when_rejected` hung
+  ~10% of parallel runs (0/60 after the fix).
+
 ## Still open
 
-- Engine lock held across provider I/O (P12 tranche 2).
-- Image input (user messages and `read` of images) — `AgentMessage::User` is
-  text-only; needs a content-block user message.
-- Background processes for `bash` (dev servers) with output paging.
 - Project `.harness/mcp.json` starts servers without `harness trust` — the same
   code-execution concern hooks now guard against. Gating it changes existing
   behavior, so it is left for a deliberate decision.

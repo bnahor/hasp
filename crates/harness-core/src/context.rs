@@ -17,6 +17,7 @@ pub const BASE_SYSTEM_PROMPT: &str = r#"You are a terminal-based coding agent. Y
 - Search with the grep and glob tools and read files with read; use bash for building, testing and running things. Search and read results are capped, so narrow a query rather than dumping whole trees.
 - When several reads or searches do not depend on each other, request them together in one response — they run in parallel.
 - For work with several steps, keep a checklist with the todo tool and update it as each step finishes.
+- Start servers, watchers and other long-running commands with bash `background: true`, check them with the job tool, and kill them when you are done.
 - A tool error is information: read it and adjust instead of repeating the same call.
 
 # Working style

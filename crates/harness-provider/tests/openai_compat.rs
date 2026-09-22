@@ -33,6 +33,32 @@ fn serve_once(
     })
 }
 
+/// Serve several requests in order from one thread, returning each request's
+/// head. Two `serve_once` threads on clones of one listener would race for the
+/// first connection, and the loser would wait forever for one more.
+fn serve_seq(
+    listener: TcpListener,
+    responses: Vec<(&'static str, &'static str, String)>,
+) -> std::thread::JoinHandle<Vec<String>> {
+    std::thread::spawn(move || {
+        responses
+            .into_iter()
+            .map(|(status, content_type, body)| {
+                let (mut sock, _) = listener.accept().expect("client connects");
+                let mut buf = vec![0u8; 65536];
+                let n = sock.read(&mut buf).expect("read request");
+                let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                let resp = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+                sock.write_all(resp.as_bytes()).expect("write response");
+                head
+            })
+            .collect()
+    })
+}
+
 struct Rec(Vec<String>);
 impl Sink for Rec {
     fn on_delta(&mut self, t: &str) {
@@ -148,20 +174,23 @@ async fn retries_without_stream_options_when_rejected() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     // First request: rejected exactly the way pre-stream_options servers do.
-    let rejected = serve_once(
-        listener.try_clone().unwrap(),
-        "400 Bad Request",
-        "application/json",
-        r#"{"error":{"message":"unknown field: stream_options"}}"#.into(),
-    );
-    let ok = serve_once(
+    let server = serve_seq(
         listener,
-        "200 OK",
-        "text/event-stream",
-        "data: {\"choices\":[{\"delta\":{\"content\":\"fine\"}}]}\n\n\
-         data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
-         data: [DONE]\n\n"
-            .into(),
+        vec![
+            (
+                "400 Bad Request",
+                "application/json",
+                r#"{"error":{"message":"unknown field: stream_options"}}"#.into(),
+            ),
+            (
+                "200 OK",
+                "text/event-stream",
+                "data: {\"choices\":[{\"delta\":{\"content\":\"fine\"}}]}\n\n\
+                 data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+                 data: [DONE]\n\n"
+                    .into(),
+            ),
+        ],
     );
 
     let p = OpenAICompat::new(
@@ -176,8 +205,8 @@ async fn retries_without_stream_options_when_rejected() {
         fn on_delta(&mut self, _t: &str) {}
     }
     let turn = p.complete(&req(), &mut Noop).await.expect("turn ok");
-    let first = rejected.join().expect("first request");
-    let second = ok.join().expect("second request");
+    let heads = server.join().expect("server thread");
+    let (first, second) = (&heads[0], &heads[1]);
     assert!(first.contains("stream_options"));
     assert!(!second.contains("stream_options"), "retried without it");
     assert_eq!(turn.stop_reason, StopReason::Stop);

@@ -7,6 +7,7 @@ mod agent;
 mod bash;
 pub mod diff;
 mod fs;
+pub mod jobs;
 pub mod sandbox;
 mod search;
 mod skill;
@@ -17,6 +18,7 @@ mod web;
 pub use agent::{AgentsTool, GoalCompleteTool, MessageTool, SpawnTool, SubagentTool};
 pub use bash::{BashTool, escapes_cwd, is_simple, seed_allowlist};
 pub use fs::{EditTool, ReadTool, WriteTool};
+pub use jobs::{JobTable, JobTool};
 pub use search::{GlobTool, GrepTool};
 pub use skill::SkillTool;
 pub use symbols::SymbolSearchTool;
@@ -47,11 +49,15 @@ pub fn builtins_for(project: &std::path::Path) -> Vec<Box<dyn Tool>> {
 }
 
 pub fn builtins_base() -> Vec<Box<dyn Tool>> {
+    // One job table per tool set: `bash` starts jobs, `job` manages them, and
+    // dropping the tools (the session) stops whatever is still running.
+    let jobs = std::sync::Arc::new(JobTable::default());
     let mut tools: Vec<Box<dyn Tool>> = vec![
         Box::new(ReadTool),
         Box::new(WriteTool),
         Box::new(EditTool),
-        Box::new(BashTool),
+        Box::new(BashTool::with_jobs(jobs.clone())),
+        Box::new(JobTool::new(jobs)),
         // Read-only extras: children and the MCP server get these too.
         Box::new(WebFetchTool),
         Box::new(SymbolSearchTool),

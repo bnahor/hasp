@@ -56,7 +56,7 @@ Keys: `enter` send · `ctrl+j` newline · `esc` cancel a turn · `↑`/`↓` his
 
 ## Tools
 
-`read`, `write`, `edit`, `bash`, `grep`, `glob`, `todo`, `web_fetch`,
+`read`, `write`, `edit`, `bash`, `job`, `grep`, `glob`, `todo`, `web_fetch`,
 `symbol_search`, plus `skill` when skills are installed and the agent-bus
 tools below.
 
@@ -71,6 +71,24 @@ tools below.
   `read` caps long lines and total size, refuses binaries, and lists
   directories. `edit` falls back to CRLF- and whitespace-tolerant matching,
   only when the match is unique.
+- **Background jobs**: `bash` with `background: true` starts a dev server,
+  watcher or long build and returns at once. It goes through the same gate,
+  rules and sandbox as any command. `job` lists jobs, pages each job's *new*
+  output with its exit status, and kills a job's whole process group. Jobs
+  belong to the session: at most 8 run at once, and any still running are
+  stopped when the session ends.
+
+## Images
+
+Drag a screenshot into the terminal (the pasted path is picked up, escaped
+spaces and quotes included) or mention one as `@path/to/shot.png`. The image
+is attached to the prompt and the path in the text becomes `[image 1: …]`.
+`read` shows PNG/JPEG/GIF/WebP files to the model as images. MCP tools that
+return images pass them through, `--mcp-serve` returns them, and ACP editors
+can send image blocks. Images over 3.75 MB are downscaled with `sips` (macOS)
+or ImageMagick. Models that cannot see images (DeepSeek, text-only GLM,
+`HARNESS_COMPAT_VISION=off`) get a placeholder instead of an error, so a
+session with an image in it keeps working after a model switch.
 
 ## Commands, skills and hooks
 
@@ -204,6 +222,14 @@ workspace (use `harness shutdown` to end it), because quietly evicting a session
 that may be mid-goal would be worse. Approval questions with no client attached
 are denied immediately instead of waiting for a client that is gone.
 
+A turn holds the engine only for moments (building a request, recording a
+sample, recording tool results). The model stream, tools, hooks, child waits
+and the compaction summary run without it, so `/stats`, `/model`, `/goal` and
+renames answer while a turn is working. Turns run one at a time. Requests that
+would swap the session under a running turn (`/branch <id>`, `/worktree`,
+`/worktree-exit`, and `/new` and `/resume` when embedded) are refused with a
+message rather than queued. Cancel first.
+
 `--no-daemon` runs everything embedded, `--serve` runs the daemon in the
 foreground. Transport is newline-delimited JSON-RPC 2.0 over `$HARNESS_SOCKET`
 or `~/.harness/daemon.sock`.
@@ -240,7 +266,7 @@ cheaper.
 
 ## Tests and CI
 
-`cargo test --workspace` (167 tests) plus `cargo fmt --all --check` and
+`cargo test --workspace` (178 tests) plus `cargo fmt --all --check` and
 `cargo clippy --workspace --all-targets -- -D warnings`, which
 `.github/workflows/ci.yml` runs on macOS and Linux. Tagging `vX.Y.Z` builds
 binaries for both macOS architectures and Linux via `release.yml`, and
