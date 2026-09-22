@@ -6,6 +6,8 @@ pub mod compaction;
 pub mod context;
 pub mod cron;
 pub mod engine;
+pub mod extensions;
+pub mod hooks;
 pub mod session;
 pub mod trace;
 
@@ -26,12 +28,32 @@ pub enum ContentBlock {
     },
     Thinking {
         thinking: String,
+        /// Provider signature that makes the block replayable. Models that
+        /// think across tool calls need their own thinking handed back
+        /// unchanged; dropping it is a history edit (cache miss, and a 400 on
+        /// models that enforce preserved thinking). Absent in old journals.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+        /// Opaque payload of a `redacted_thinking` block, replayed verbatim.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        redacted: Option<String>,
     },
     ToolCall {
         id: String,
         name: String,
         arguments: Value,
     },
+}
+
+impl ContentBlock {
+    /// Unsigned thinking (providers that do not sign, tests, the mock).
+    pub fn thinking(text: impl Into<String>) -> Self {
+        ContentBlock::Thinking {
+            thinking: text.into(),
+            signature: None,
+            redacted: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -113,7 +135,7 @@ pub fn estimate_tokens(messages: &[AgentMessage]) -> u64 {
                 .iter()
                 .map(|b| match b {
                     ContentBlock::Text { text } => estimate_text_tokens(text),
-                    ContentBlock::Thinking { thinking } => estimate_text_tokens(thinking),
+                    ContentBlock::Thinking { thinking, .. } => estimate_text_tokens(thinking),
                     ContentBlock::ToolCall {
                         name, arguments, ..
                     } => estimate_text_tokens(name) + estimate_text_tokens(&arguments.to_string()),
@@ -244,6 +266,11 @@ pub trait Provider: Send + Sync {
 
 // ---- tools ----
 
+/// Key under which a provider stores tool input that was not valid JSON
+/// (typically truncated by `max_tokens`). The engine refuses to run such a
+/// call and tells the model why.
+pub const INVALID_INPUT_KEY: &str = "__invalid_input";
+
 #[derive(Debug, Clone)]
 pub struct ToolOutput {
     pub content: String,
@@ -303,6 +330,13 @@ pub struct ToolCtx<'a> {
 pub trait Tool: Send + Sync {
     fn spec(&self) -> ToolSpec;
 
+    /// True when the tool only reads and never consults the gate, so several
+    /// calls from one model turn may run at once. Models batch independent
+    /// reads and searches into one turn precisely so they can be parallel.
+    fn concurrency_safe(&self) -> bool {
+        false
+    }
+
     async fn execute(&self, args: Value, ctx: &mut ToolCtx<'_>) -> ToolOutput;
 }
 
@@ -318,6 +352,19 @@ pub enum GateDecision {
 pub trait Gate: Send + Sync {
     fn check_bash(&mut self, command: &str) -> GateDecision;
     fn check_write(&mut self, path: &str) -> GateDecision;
+}
+
+/// The gate concurrent (read-only) calls run under: they never ask, and if
+/// one ever did, refusing is the only answer that cannot race a prompt.
+pub struct RefuseGate;
+
+impl Gate for RefuseGate {
+    fn check_bash(&mut self, _: &str) -> GateDecision {
+        GateDecision::Deny("not available to a concurrent read-only call".into())
+    }
+    fn check_write(&mut self, _: &str) -> GateDecision {
+        GateDecision::Deny("not available to a concurrent read-only call".into())
+    }
 }
 
 // ---- agent bus (research/03-architecture.md §8.2) ----

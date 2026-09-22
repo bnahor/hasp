@@ -13,6 +13,12 @@ pub const BASE_SYSTEM_PROMPT: &str = r#"You are a terminal-based coding agent. Y
 - Project root: {ROOT}. All file paths must be relative to it; absolute paths and `..` are rejected.
 - A trace of every API call and tool execution is written under `.harness/traces/` in the project root (newest file = current run). Read it when you need to debug your own behavior.
 
+# Using tools
+- Search with the grep and glob tools and read files with read; use bash for building, testing and running things. Search and read results are capped, so narrow a query rather than dumping whole trees.
+- When several reads or searches do not depend on each other, request them together in one response — they run in parallel.
+- For work with several steps, keep a checklist with the todo tool and update it as each step finishes.
+- A tool error is information: read it and adjust instead of repeating the same call.
+
 # Working style
 - Read before editing; prefer the smallest change that solves the problem.
 - Verify work by running the project's own build/test commands when practical, and report results honestly. Do not claim something works unless it has been run or tested.
@@ -68,7 +74,7 @@ pub fn assemble_with(
 /// 60 minutes exceeds every provider's default prompt-cache TTL.
 pub const IDLE_PRUNE_AFTER_MS: i64 = 60 * 60 * 1000;
 pub const PRUNE_KEEP_RECENT: usize = 5;
-const COMPACTABLE_TOOLS: &[&str] = &["read", "write", "edit", "bash"];
+const COMPACTABLE_TOOLS: &[&str] = &["read", "write", "edit", "bash", "grep", "glob"];
 pub const CLEARED_MARKER: &str = "[Old tool result content cleared]";
 
 pub fn prune_stale(messages: &mut [AgentMessage]) {

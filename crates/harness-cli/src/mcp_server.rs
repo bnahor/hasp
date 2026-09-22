@@ -56,7 +56,12 @@ pub async fn serve() -> Result<()> {
     // Not interactive: the gate's existing policy already means "allowlisted
     // read-only commands only, no writes" — exactly the right default here.
     let mut gate: Box<dyn Gate> = Box::new(DenyGate(GateCore::new(yolo(), false)));
-    let tools: Vec<Box<dyn Tool>> = harness_tools::builtins_base();
+    // `todo` is a planning aid for this harness's own loop; to another agent
+    // it would be a tool that does nothing.
+    let tools: Vec<Box<dyn Tool>> = harness_tools::builtins_base()
+        .into_iter()
+        .filter(|t| t.spec().name != "todo")
+        .collect();
     let specs: Vec<Value> = tools
         .iter()
         .map(|t| {

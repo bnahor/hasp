@@ -25,23 +25,44 @@ impl ModelInfo {
 }
 
 pub fn fallback_catalog() -> Vec<ModelInfo> {
-    let mut models: Vec<ModelInfo> = [
-        ("claude-sonnet-4-5", 200_000u64),
-        ("claude-sonnet-4-6", 200_000),
-        ("claude-opus-4-8", 200_000),
-        ("claude-haiku-4-5", 200_000),
-        ("glm-4.6", 200_000),
-        ("glm-4.5", 128_000),
-    ]
-    .into_iter()
-    .map(|(id, w)| ModelInfo {
-        id: id.into(),
-        context_window: w,
-        ..Default::default()
-    })
-    .collect();
+    let mut models: Vec<ModelInfo> = [("glm-4.6", 200_000u64), ("glm-4.5", 128_000)]
+        .into_iter()
+        .map(|(id, w)| ModelInfo {
+            id: id.into(),
+            context_window: w,
+            ..Default::default()
+        })
+        .collect();
+    models.extend(claude_models());
     models.extend(deepseek_models());
     models
+}
+
+/// First-party Claude list prices (input, output per MTok). Cache reads bill
+/// at 0.1× input and 5-minute cache writes at 1.25×.
+fn claude_models() -> Vec<ModelInfo> {
+    let model = |id: &str, window: u64, max_out: u64, input: f64, output: f64| ModelInfo {
+        id: id.into(),
+        context_window: window,
+        max_output: Some(max_out),
+        input_per_mtok: Some(input),
+        output_per_mtok: Some(output),
+        cache_read_per_mtok: Some(input * 0.1),
+        cache_write_per_mtok: Some(input * 1.25),
+    };
+    vec![
+        model("claude-fable-5-1", 1_000_000, 128_000, 10.0, 50.0),
+        model("claude-fable-5", 1_000_000, 128_000, 10.0, 50.0),
+        model("claude-opus-5-5", 1_000_000, 128_000, 4.0, 20.0),
+        model("claude-opus-5", 1_000_000, 128_000, 5.0, 25.0),
+        model("claude-opus-4-8", 1_000_000, 128_000, 5.0, 25.0),
+        model("claude-opus-4-7", 1_000_000, 128_000, 5.0, 25.0),
+        model("claude-opus-4-6", 1_000_000, 128_000, 5.0, 25.0),
+        model("claude-sonnet-5", 1_000_000, 128_000, 2.0, 10.0),
+        model("claude-sonnet-4-6", 1_000_000, 128_000, 3.0, 15.0),
+        model("claude-sonnet-4-5", 200_000, 64_000, 3.0, 15.0),
+        model("claude-haiku-4-5", 200_000, 64_000, 1.0, 5.0),
+    ]
 }
 
 /// DeepSeek bills peak and off-peak rates; the peak (higher) numbers are used
@@ -73,13 +94,20 @@ pub fn path() -> std::io::Result<PathBuf> {
     catalog_path()
 }
 
+/// The fetched catalog, topped up with bundled entries it does not list — a
+/// model newer than the last fetch still gets its real window and prices.
 pub fn load() -> Vec<ModelInfo> {
-    catalog_path()
+    let mut models: Vec<ModelInfo> = catalog_path()
         .ok()
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|text| serde_json::from_str(&text).ok())
-        .filter(|models: &Vec<ModelInfo>| !models.is_empty())
-        .unwrap_or_else(fallback_catalog)
+        .unwrap_or_default();
+    for m in fallback_catalog() {
+        if !models.iter().any(|have| have.id == m.id) {
+            models.push(m);
+        }
+    }
+    models
 }
 
 /// How old the stored catalog may get before startup refreshes it.

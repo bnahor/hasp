@@ -10,6 +10,9 @@ pub const WRITE_TOOL_NAME: &str = "write";
 pub const EDIT_TOOL_NAME: &str = "edit";
 
 const READ_ARTIFACT_THRESHOLD: usize = 64 * 1024;
+/// Most text a single `read` returns; the rest is reachable with `offset`.
+const READ_MAX_BYTES: usize = 100 * 1024;
+const READ_MAX_LINE_BYTES: usize = 2000;
 
 pub struct ReadTool;
 
@@ -33,6 +36,10 @@ impl Tool for ReadTool {
         }
     }
 
+    fn concurrency_safe(&self) -> bool {
+        true
+    }
+
     async fn execute(&self, args: Value, ctx: &mut ToolCtx<'_>) -> ToolOutput {
         let Some(path) = args["path"].as_str() else {
             return ToolOutput::error("missing `path`");
@@ -43,27 +50,62 @@ impl Tool for ReadTool {
             Ok(p) => p,
             Err(e) => return ToolOutput::error(e.to_string()),
         };
+        if abs.is_dir() {
+            return list_dir(&abs, path).await;
+        }
         let bytes = match tokio::fs::read(&abs).await {
             Ok(b) => b,
             Err(e) => return ToolOutput::error(e.to_string()),
         };
+        if bytes.iter().take(8192).any(|&b| b == 0) {
+            return ToolOutput::error(format!(
+                "{path} looks binary ({} bytes); not shown as text",
+                bytes.len()
+            ));
+        }
         let text = String::from_utf8_lossy(&bytes);
         let all_lines: Vec<&str> = text.lines().collect();
         let total = all_lines.len();
         let start = (offset as usize - 1).min(total);
-        let end = (start + limit as usize).min(total);
-        let mut body = all_lines[start..end]
-            .iter()
-            .enumerate()
-            .map(|(i, l)| format!("{:>6} | {}", start + i + 1, l))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let mut end = (start + limit as usize).min(total);
+        let mut body = String::new();
+        let mut clipped_lines = 0;
+        for (i, line) in all_lines[start..end].iter().enumerate() {
+            // A byte budget as well as a line budget: 2000 lines of minified
+            // code would otherwise put megabytes into the context.
+            if body.len() > READ_MAX_BYTES {
+                end = start + i;
+                break;
+            }
+            let shown = if line.len() > READ_MAX_LINE_BYTES {
+                clipped_lines += 1;
+                let mut cut = READ_MAX_LINE_BYTES;
+                while !line.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                format!("{}… [line truncated, {} bytes]", &line[..cut], line.len())
+            } else {
+                line.to_string()
+            };
+            if !body.is_empty() {
+                body.push('\n');
+            }
+            body.push_str(&format!("{:>6} | {}", start + i + 1, shown));
+        }
+        if total == 0 {
+            body.push_str("(empty file)");
+        }
         if end < total {
             body.push_str(&format!(
                 "\n... ({} of {} lines shown; call again with offset {})",
                 end - start,
                 total,
                 end + 1
+            ));
+        }
+        if clipped_lines > 0 {
+            body.push_str(&format!(
+                "\n[{clipped_lines} long line(s) truncated; use grep with a narrow pattern to see them]"
             ));
         }
         if bytes.len() > READ_ARTIFACT_THRESHOLD
@@ -75,6 +117,34 @@ impl Tool for ReadTool {
         }
         ToolOutput::text(body)
     }
+}
+
+/// Reading a directory lists it — models ask for one often enough that an
+/// error would just cost a round trip.
+async fn list_dir(abs: &std::path::Path, shown: &str) -> ToolOutput {
+    let mut entries = match tokio::fs::read_dir(abs).await {
+        Ok(e) => e,
+        Err(e) => return ToolOutput::error(e.to_string()),
+    };
+    let mut names = Vec::new();
+    while let Ok(Some(e)) = entries.next_entry().await {
+        let mut name = e.file_name().to_string_lossy().into_owned();
+        if e.file_type().await.is_ok_and(|t| t.is_dir()) {
+            name.push('/');
+        }
+        names.push(name);
+    }
+    names.sort();
+    let total = names.len();
+    names.truncate(500);
+    let mut out = format!(
+        "{shown} is a directory ({total} entries):\n{}",
+        names.join("\n")
+    );
+    if total > 500 {
+        out.push_str("\n[… more entries; use glob to narrow]");
+    }
+    ToolOutput::text(out)
 }
 
 pub struct WriteTool;
@@ -166,31 +236,120 @@ impl Tool for EditTool {
             Ok(t) => t,
             Err(e) => return ToolOutput::error(e.to_string()),
         };
+        if old.is_empty() {
+            return ToolOutput::error("`old_text` is empty; use write to create a file");
+        }
         let count = text.matches(old).count();
-        if count == 0 {
-            return ToolOutput::error("`old_text` not found in file");
-        }
-        if count > 1 && !replace_all {
-            return ToolOutput::error(format!(
-                "`old_text` matches {count} times; provide more surrounding context or set replace_all"
-            ));
-        }
+        let (updated, count, note) = if count == 0 {
+            match fuzzy_replace(&text, old, new) {
+                Ok((updated, note)) => (updated, 1, note),
+                Err(e) => return ToolOutput::error(e),
+            }
+        } else {
+            if count > 1 && !replace_all {
+                return ToolOutput::error(format!(
+                    "`old_text` matches {count} times; provide more surrounding context or set replace_all"
+                ));
+            }
+            let updated = if replace_all {
+                text.replace(old, new)
+            } else {
+                text.replacen(old, new, 1)
+            };
+            (updated, count, "")
+        };
         if let GateDecision::Deny(reason) = ctx.gate.check_write(path) {
             return ToolOutput::error(format!("edit not approved: {reason}"));
         }
-        let updated = if replace_all {
-            text.replace(old, new)
-        } else {
-            text.replacen(old, new, 1)
-        };
         match tokio::fs::write(&abs, &updated).await {
             Ok(_) => ToolOutput::text(format!(
-                "replaced {count} occurrence(s) in {path}\n{}",
+                "replaced {count} occurrence(s) in {path}{note}\n{}",
                 crate::diff::unified(&text, &updated, path)
             )),
             Err(e) => ToolOutput::error(e.to_string()),
         }
     }
+}
+
+/// Fallbacks for an `old_text` with no exact match, in order of strictness,
+/// each accepted only when it identifies exactly one place: the same text with
+/// the file's CRLF line endings, then the same lines ignoring trailing
+/// whitespace, then ignoring indentation too. The replaced span is the file's
+/// own lines, so nothing outside the match moves.
+fn fuzzy_replace(text: &str, old: &str, new: &str) -> Result<(String, &'static str), String> {
+    if text.contains("\r\n") && !old.contains('\r') {
+        let (old_crlf, new_crlf) = (old.replace('\n', "\r\n"), new.replace('\n', "\r\n"));
+        match text.matches(&old_crlf).count() {
+            1 => {
+                return Ok((
+                    text.replacen(&old_crlf, &new_crlf, 1),
+                    " (matched with CRLF line endings)",
+                ));
+            }
+            n if n > 1 => {
+                return Err(format!(
+                    "`old_text` matches {n} times (with CRLF line endings); add surrounding context"
+                ));
+            }
+            _ => {}
+        }
+    }
+    let old_lines: Vec<&str> = old.trim_end_matches('\n').split('\n').collect();
+    // Byte span of each line of the file, without its terminator.
+    let mut spans = Vec::new();
+    let mut pos = 0;
+    for line in text.split_inclusive('\n') {
+        let body = line.trim_end_matches('\n').trim_end_matches('\r');
+        spans.push((pos, pos + body.len()));
+        pos += line.len();
+    }
+    let line = |i: usize| &text[spans[i].0..spans[i].1];
+    type Pass = (fn(&str) -> &str, &'static str);
+    let passes: [Pass; 2] = [
+        (str::trim_end, " (matched ignoring trailing whitespace)"),
+        (
+            str::trim,
+            " (matched ignoring indentation — check the result's indentation)",
+        ),
+    ];
+    for (norm, note) in passes {
+        let k = old_lines.len();
+        if k == 0 || k > spans.len() || old_lines.iter().all(|l| norm(l).is_empty()) {
+            break;
+        }
+        let hits: Vec<usize> = (0..=spans.len() - k)
+            .filter(|&s| (0..k).all(|j| norm(line(s + j)) == norm(old_lines[j])))
+            .collect();
+        match hits.as_slice() {
+            [s] => {
+                let (from, to) = (spans[*s].0, spans[*s + k - 1].1);
+                // The span stops before the last line's terminator, so a
+                // trailing newline in `old`/`new` is already accounted for.
+                let replacement = match old.ends_with('\n') {
+                    true => new.strip_suffix('\n').unwrap_or(new),
+                    false => new,
+                };
+                let mut out = String::with_capacity(text.len() + new.len());
+                out.push_str(&text[..from]);
+                out.push_str(replacement);
+                out.push_str(&text[to..]);
+                return Ok((out, note));
+            }
+            [] => continue,
+            many => {
+                return Err(format!(
+                    "`old_text` not found exactly, and matches {} places when whitespace is \
+                     ignored; add surrounding context",
+                    many.len()
+                ));
+            }
+        }
+    }
+    Err(
+        "`old_text` not found in file. Re-read the file (it may have changed) and copy the \
+         text exactly, including whitespace."
+            .into(),
+    )
 }
 
 #[cfg(test)]
@@ -323,6 +482,34 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(tmp.path().join("g.txt")).unwrap(),
             "m m m"
+        );
+    }
+
+    #[test]
+    fn fuzzy_edit_tolerates_whitespace_and_crlf_but_only_when_unique() {
+        let text = "fn a() {\n    let x = 1;   \n    x\n}\n";
+        let (out, note) =
+            fuzzy_replace(text, "    let x = 1;\n    x", "    let x = 2;\n    x").unwrap();
+        assert_eq!(out, "fn a() {\n    let x = 2;\n    x\n}\n");
+        assert!(note.contains("trailing"));
+
+        let (out, note) = fuzzy_replace(text, "let x = 1;", "    let y = 1;").unwrap();
+        assert_eq!(out, "fn a() {\n    let y = 1;\n    x\n}\n");
+        assert!(note.contains("indentation"));
+
+        let crlf = "a\r\nb\r\nc\r\n";
+        let (out, _) = fuzzy_replace(crlf, "a\nb", "a\nB").unwrap();
+        assert_eq!(out, "a\r\nB\r\nc\r\n");
+
+        assert!(
+            fuzzy_replace("  a b\n    a b\n", "a b\t", "y")
+                .unwrap_err()
+                .contains("2 places")
+        );
+        assert!(
+            fuzzy_replace("abc\n", "zzz", "y")
+                .unwrap_err()
+                .contains("not found")
         );
     }
 }

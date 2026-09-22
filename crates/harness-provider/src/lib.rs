@@ -39,7 +39,7 @@ pub fn default_model(provider: &str) -> &'static str {
     match provider {
         "zai" => zai::DEFAULT_MODEL,
         "deepseek" => deepseek::DEFAULT_MODEL,
-        _ => "claude-sonnet-4-5",
+        _ => "claude-opus-5",
     }
 }
 
@@ -52,12 +52,28 @@ pub fn anthropic_compatible(
 ) -> Option<anthropic::Anthropic> {
     let window = context_window_for(&model);
     let client = match provider {
-        "anthropic" => Some(anthropic::Anthropic::new(api_key, model)),
+        "anthropic" => {
+            let effort = std::env::var("HARNESS_EFFORT").ok();
+            Some(anthropic::Anthropic::new(api_key, model).with_reasoning(effort.as_deref()))
+        }
         "zai" => Some(zai::client(api_key, model)),
         "deepseek" => Some(deepseek::client(api_key, model)),
         _ => None,
     };
     client.map(|c| c.with_window(window))
+}
+
+/// Output-token ceiling for a request to `model`: the catalog's limit, capped
+/// at 64k (streamed, so no HTTP-timeout concern; large enough that writing a
+/// big file does not get its tool input cut off). Unknown models get a
+/// conservative 16k, which every endpoint accepts.
+pub fn max_output_for(model: &str) -> u32 {
+    catalog::load()
+        .into_iter()
+        .find(|m| m.id == model)
+        .and_then(|m| m.max_output)
+        .map(|n| n.min(64_000) as u32)
+        .unwrap_or(16_384)
 }
 
 /// Context window for a model id, preferring the fetched catalog. The 200k

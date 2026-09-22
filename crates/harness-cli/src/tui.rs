@@ -113,6 +113,33 @@ const COMMANDS: &[(&str, &str)] = &[
 ];
 
 /// One row of the completion menu.
+/// Prompt templates from `.harness/commands`, `.claude/commands` and their
+/// home-directory twins, loaded once per process (names that shadow a
+/// built-in are left out — the built-in wins). Leaked so they share the
+/// built-ins' `'static` shape; it is a few hundred bytes, once.
+fn user_commands() -> &'static [(&'static str, &'static str)] {
+    static CELL: std::sync::OnceLock<Vec<(&'static str, &'static str)>> =
+        std::sync::OnceLock::new();
+    CELL.get_or_init(|| {
+        let Ok(cwd) = std::env::current_dir() else {
+            return Vec::new();
+        };
+        let root = harness_workspace::Workspace::resolve(&cwd)
+            .map(|w| w.root().to_path_buf())
+            .unwrap_or(cwd);
+        harness_core::extensions::commands(&root)
+            .into_iter()
+            .filter(|c| !COMMANDS.iter().any(|(n, _)| *n == c.name))
+            .map(|c| {
+                let name: &'static str = Box::leak(c.name.into_boxed_str());
+                let desc: &'static str =
+                    Box::leak(format!("{} (template)", c.description).into_boxed_str());
+                (name, desc)
+            })
+            .collect()
+    })
+}
+
 enum MenuItem {
     Command(&'static str, &'static str),
     File(String),
@@ -671,7 +698,7 @@ impl App {
         }
         let word = head.split_whitespace().next().unwrap_or_default();
         if word.starts_with('/') && head.len() == word.len() {
-            return completions_for(&self.input)
+            return completions_for(&self.input, user_commands())
                 .into_iter()
                 .map(|(name, description)| MenuItem::Command(name, description))
                 .collect();
@@ -1327,6 +1354,13 @@ impl App {
                     ),
                 }
             }
+            other if user_commands().iter().any(|(n, _)| *n == other) => {
+                // The engine expands the template; the transcript shows what
+                // was typed.
+                let typed = format!("/{cmd}");
+                self.user_line(&typed);
+                self.spawn_turn(typed);
+            }
             other => self.push(format!("unknown command /{other} — /help"), LineKind::Error),
         }
         self.refresh_footer();
@@ -1533,6 +1567,7 @@ impl App {
             let area = f.area();
             let mut lines: Vec<Line<'static>> = COMMANDS
                 .iter()
+                .chain(user_commands())
                 .map(|(name, description)| {
                     Line::from(vec![
                         Span::styled(
@@ -1570,7 +1605,10 @@ impl App {
 
 /// Commands matching a half-typed slash command. Offers nothing once arguments
 /// have been typed, and tolerates leading/trailing whitespace.
-fn completions_for(input: &str) -> Vec<&'static (&'static str, &'static str)> {
+fn completions_for(
+    input: &str,
+    extra: &'static [(&'static str, &'static str)],
+) -> Vec<&'static (&'static str, &'static str)> {
     let head = input.trim();
     let word = head.split_whitespace().next().unwrap_or_default();
     if !word.starts_with('/') || head.len() > word.len() {
@@ -1579,6 +1617,7 @@ fn completions_for(input: &str) -> Vec<&'static (&'static str, &'static str)> {
     let prefix = &word[1..];
     COMMANDS
         .iter()
+        .chain(extra)
         .filter(|(name, _)| name.starts_with(prefix))
         .collect()
 }
@@ -1794,7 +1833,7 @@ mod tests {
     use super::*;
 
     fn names(input: &str) -> Vec<&'static str> {
-        completions_for(input)
+        completions_for(input, &[])
             .into_iter()
             .map(|(n, _)| *n)
             .collect()

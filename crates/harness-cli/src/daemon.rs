@@ -8,7 +8,6 @@ use harness_core::session::SessionManager;
 use harness_core::{AgentMessage, Bus, ContentBlock, Gate, GateDecision, Provider, Sink};
 use harness_provider::catalog;
 use harness_provider::echo::EchoProvider;
-use harness_tools::builtins;
 use harness_wire::{self, RpcError, Wire};
 use harness_workspace::Workspace;
 use std::collections::HashMap;
@@ -798,7 +797,7 @@ impl Handler {
 
         let factory = provider_factory();
         let model = default_model_for(&provider_name());
-        let mut tools = builtins();
+        let mut tools = harness_tools::builtins_for(ws.root());
         tools.extend(harness_mcp::tools_for(&ws).await);
         // The resident's output slot: turn updates and approval questions reach
         // whichever client is attached, or nobody when the session is detached.
@@ -814,7 +813,7 @@ impl Handler {
                     client.clone(),
                 )),
                 model.clone(),
-                16384,
+                harness_provider::max_output_for(&model),
             )
             .map_err(|e| e.to_string())
         }) {
@@ -839,8 +838,8 @@ impl Handler {
         });
         let bus = Arc::new(harness_bus::LocalBus::new(
             ws.clone(),
-            model,
-            16384,
+            model.clone(),
+            harness_provider::max_output_for(&model),
             factory,
             gate_factory,
             engine.notice_inbox(),
@@ -1225,6 +1224,7 @@ impl Handler {
                             Err(format!("unknown model {model}"))
                         } else {
                             eng.model = model.to_string();
+                            eng.max_tokens = harness_provider::max_output_for(model);
                             let provider = eng.provider.name();
                             eng.session.append_model_change(provider, model);
                             Ok(serde_json::json!({"model": model}))

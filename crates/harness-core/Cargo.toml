@@ -5,6 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+futures-util.workspace = true
+regex = "1"
 harness-workspace = { workspace = true }
 # Only for cron's localtime_r (already in the tree via tokio/mio).
 libc = "0.2"

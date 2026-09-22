@@ -99,7 +99,7 @@ async fn streams_thinking_text_and_fragmented_tool_calls() {
 
     match turn.blocks.as_slice() {
         [
-            ContentBlock::Thinking { thinking },
+            ContentBlock::Thinking { thinking, .. },
             ContentBlock::Text { text },
             ContentBlock::ToolCall {
                 id,

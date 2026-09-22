@@ -232,6 +232,7 @@ impl Backend for EngineBackend {
                     return Err(anyhow!("unknown model {model}"));
                 }
                 eng.model = model.to_string();
+                eng.max_tokens = harness_provider::max_output_for(model);
                 let provider = eng.provider.name();
                 eng.session.append_model_change(provider, model);
                 Ok(json!({"model": model}))

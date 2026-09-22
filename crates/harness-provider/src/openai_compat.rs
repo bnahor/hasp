@@ -353,7 +353,7 @@ impl Provider for OpenAICompat {
 
         let mut blocks = Vec::new();
         if !thinking.is_empty() {
-            blocks.push(ContentBlock::Thinking { thinking });
+            blocks.push(ContentBlock::thinking(thinking));
         }
         if !text.is_empty() {
             blocks.push(ContentBlock::Text { text });

@@ -31,6 +31,8 @@ async fn serves_the_tool_layer_with_the_same_confinement_and_policy() {
         vec![
             "bash",
             "edit",
+            "glob",
+            "grep",
             "read",
             "symbol_search",
             "web_fetch",

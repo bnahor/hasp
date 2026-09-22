@@ -92,6 +92,10 @@ impl Tool for SymbolSearchTool {
         }
     }
 
+    fn concurrency_safe(&self) -> bool {
+        true
+    }
+
     async fn execute(&self, args: Value, ctx: &mut ToolCtx<'_>) -> ToolOutput {
         let Some(query) = args["query"].as_str() else {
             return ToolOutput::error("missing `query`");

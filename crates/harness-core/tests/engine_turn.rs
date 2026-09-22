@@ -633,3 +633,251 @@ async fn sync_subagent_gives_up_and_points_at_the_notice() {
     assert!(results[0].contains("still running"), "{}", results[0]);
     assert!(results[0].contains("notice"), "{}", results[0]);
 }
+
+/// Read-only tool that takes a while, to observe concurrency.
+struct SlowRead;
+
+#[async_trait::async_trait]
+impl Tool for SlowRead {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "slow_read".into(),
+            description: "d".into(),
+            input_schema: json!({"type": "object"}),
+        }
+    }
+    fn concurrency_safe(&self) -> bool {
+        true
+    }
+    async fn execute(&self, args: serde_json::Value, _ctx: &mut ToolCtx<'_>) -> ToolOutput {
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        ToolOutput::text(format!("read {}", args["n"]))
+    }
+}
+
+fn call(id: &str, name: &str, arguments: serde_json::Value) -> ContentBlock {
+    ContentBlock::ToolCall {
+        id: id.into(),
+        name: name.into(),
+        arguments,
+    }
+}
+
+fn results_of(engine: &Engine) -> Vec<(String, String, bool)> {
+    engine
+        .session
+        .context_messages()
+        .into_iter()
+        .filter_map(|m| match m {
+            AgentMessage::ToolResult {
+                tool_call_id,
+                content,
+                is_error,
+                ..
+            } => Some((tool_call_id, content, is_error)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn read_only_calls_in_one_turn_run_concurrently_and_answer_in_order() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = Workspace::resolve(tmp.path()).unwrap();
+    let session = SessionManager::in_memory(&ws);
+    let script = vec![
+        turn(
+            vec![
+                call("a", "slow_read", json!({"n": 1})),
+                call("b", "slow_read", json!({"n": 2})),
+                call("c", "slow_read", json!({"n": 3})),
+            ],
+            StopReason::ToolUse,
+        ),
+        turn(
+            vec![ContentBlock::Text {
+                text: "done".into(),
+            }],
+            StopReason::Stop,
+        ),
+    ];
+    let mut engine = Engine::new(
+        ws,
+        session,
+        Box::new(MockProvider::new(script)),
+        vec![Box::new(SlowRead)],
+        Box::new(AllowGate),
+        "mock".into(),
+        1024,
+    )
+    .unwrap();
+    let t = std::time::Instant::now();
+    let stats = engine.run_turn("go", &mut NoteSink(vec![])).await.unwrap();
+    assert!(
+        t.elapsed() < std::time::Duration::from_millis(1000),
+        "three 400 ms reads ran concurrently, took {:?}",
+        t.elapsed()
+    );
+    assert_eq!(stats.tool_calls, 3);
+    let results = results_of(&engine);
+    let ids: Vec<&str> = results.iter().map(|r| r.0.as_str()).collect();
+    assert_eq!(ids, vec!["a", "b", "c"], "results keep call order");
+    assert_eq!(results[2].1, "read 3");
+}
+
+#[tokio::test]
+async fn cancel_interrupts_a_running_command_and_answers_every_call() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut engine = engine_in(
+        tmp.path(),
+        vec![turn(
+            vec![
+                call("a", "bash", json!({"command": "sleep 30"})),
+                call("b", "bash", json!({"command": "echo never"})),
+            ],
+            StopReason::ToolUse,
+        )],
+        Box::new(AllowGate),
+    );
+    let canceller = engine.canceller();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        canceller.cancel();
+    });
+    let t = std::time::Instant::now();
+    let stats = engine.run_turn("go", &mut NoteSink(vec![])).await.unwrap();
+    assert!(stats.aborted);
+    assert!(
+        t.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        t.elapsed()
+    );
+    let results = results_of(&engine);
+    assert_eq!(results.len(), 2, "every tool_use is answered: {results:?}");
+    assert!(results[0].1.contains("interrupted") && results[0].2);
+    assert!(results[1].1.contains("not run") && results[1].2);
+}
+
+#[tokio::test]
+async fn truncated_tool_input_is_refused_and_the_turn_continues() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut engine = engine_in(
+        tmp.path(),
+        vec![
+            turn(
+                vec![call(
+                    "a",
+                    "write",
+                    json!({ harness_core::INVALID_INPUT_KEY: "{\"path\":\"x\",\"content\":\"hal" }),
+                )],
+                StopReason::Length,
+            ),
+            turn(
+                vec![ContentBlock::Text {
+                    text: "retrying".into(),
+                }],
+                StopReason::Stop,
+            ),
+        ],
+        Box::new(AllowGate),
+    );
+    let stats = engine.run_turn("go", &mut NoteSink(vec![])).await.unwrap();
+    assert_eq!(
+        stats.samples, 2,
+        "a max_tokens stop with tool calls gets another sample"
+    );
+    let results = results_of(&engine);
+    assert!(results[0].2 && results[0].1.contains("not valid JSON"));
+    assert!(!tmp.path().join("x").exists());
+}
+
+#[tokio::test]
+async fn hooks_block_calls_add_feedback_and_send_the_model_back() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("a.txt"), "x").unwrap();
+    let mut engine = engine_in(
+        tmp.path(),
+        vec![
+            turn(
+                vec![
+                    call("a", "bash", json!({"command": "rm -rf important"})),
+                    call("b", "read", json!({"path": "a.txt"})),
+                ],
+                StopReason::ToolUse,
+            ),
+            turn(
+                vec![ContentBlock::Text {
+                    text: "done".into(),
+                }],
+                StopReason::Stop,
+            ),
+            turn(
+                vec![ContentBlock::Text {
+                    text: "fixed".into(),
+                }],
+                StopReason::Stop,
+            ),
+        ],
+        Box::new(AllowGate),
+    );
+    let file: harness_core::hooks::HookFile = serde_json::from_value(json!({
+        "pre_tool": [{"match": "bash", "command": "grep -q rm && { echo 'rm is not allowed' >&2; exit 2; }; exit 0"}],
+        "post_tool": [{"match": "read", "command": "echo 'remember the style guide' >&2; exit 2"}],
+        // Objects once: the marker file makes the second stop pass.
+        "stop": [{"command": "test -f stopped && exit 0; touch stopped; echo 'tests fail' >&2; exit 2"}]
+    }))
+    .unwrap();
+    engine.set_hooks(harness_core::hooks::Hooks::from_file(tmp.path(), file));
+    let stats = engine.run_turn("go", &mut NoteSink(vec![])).await.unwrap();
+    assert_eq!(stats.samples, 3, "the stop hook bought one more sample");
+    let results = results_of(&engine);
+    assert!(results[0].2 && results[0].1.contains("rm is not allowed"));
+    assert!(
+        results[1]
+            .1
+            .contains("[hook feedback]\nremember the style guide")
+    );
+    let users: Vec<String> = engine
+        .session
+        .context_messages()
+        .into_iter()
+        .filter_map(|m| match m {
+            AgentMessage::User { content, .. } => Some(content),
+            _ => None,
+        })
+        .collect();
+    assert!(users.iter().any(|u| u.contains("tests fail")), "{users:?}");
+}
+
+#[tokio::test]
+async fn a_prompt_template_expands_before_it_reaches_the_model() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join(".harness/commands")).unwrap();
+    std::fs::write(
+        tmp.path().join(".harness/commands/greet.md"),
+        "---\ndescription: say hi\n---\nSay hello to $ARGUMENTS.",
+    )
+    .unwrap();
+    let mut engine = engine_in(
+        tmp.path(),
+        vec![turn(
+            vec![ContentBlock::Text { text: "hi".into() }],
+            StopReason::Stop,
+        )],
+        Box::new(AllowGate),
+    );
+    engine
+        .run_turn("/greet the team", &mut NoteSink(vec![]))
+        .await
+        .unwrap();
+    let first = engine
+        .session
+        .context_messages()
+        .into_iter()
+        .next()
+        .unwrap();
+    assert!(
+        matches!(&first, AgentMessage::User { content, .. } if content == "Say hello to the team."),
+        "{first:?}"
+    );
+}

@@ -11,11 +11,12 @@ use std::time::Instant;
 
 use crate::compaction;
 use crate::context;
+use crate::hooks::{Hooks, Verdict};
 use crate::session::{AutoState, SessionManager, now_ms};
 use crate::trace::Trace;
 use crate::{
     AgentMessage, ArtifactStore, Bus, ChildStatus, ContentBlock, Gate, ModelRequest, Provider,
-    Sink, StopReason, Tool, ToolCtx, ToolOutput, ToolSpec, Usage,
+    Sink, Tool, ToolCtx, ToolOutput, ToolSpec, Usage,
 };
 
 pub const MAX_SAMPLES_PER_TURN: usize = 50;
@@ -158,6 +159,8 @@ pub struct Engine {
     /// Autonomous-mode turn count and the token baseline it is measured from.
     auto_turns: u64,
     auto_baseline_tokens: u64,
+    hooks: Arc<Hooks>,
+    hook_warnings_shown: bool,
 }
 
 impl Engine {
@@ -186,6 +189,7 @@ impl Engine {
                 .join(&run_id),
             run_id,
         )?;
+        let hooks = Arc::new(Hooks::load(workspace.root()));
         Ok(Self {
             provider,
             tools,
@@ -203,6 +207,8 @@ impl Engine {
             goal_continuations: 0,
             auto_turns: 0,
             auto_baseline_tokens: 0,
+            hooks,
+            hook_warnings_shown: false,
         })
     }
 
@@ -210,6 +216,11 @@ impl Engine {
     /// exits here without ever taking the engine lock.
     pub fn notice_inbox(&self) -> Arc<Mutex<Vec<String>>> {
         self.notice_inbox.clone()
+    }
+
+    /// Replace the hooks loaded from disk (tests, embedders).
+    pub fn set_hooks(&mut self, hooks: Hooks) {
+        self.hooks = Arc::new(hooks);
     }
 
     pub fn set_bus(&mut self, bus: Arc<dyn Bus>) {
@@ -455,11 +466,27 @@ impl Engine {
             ms: 0,
             aborted: false,
         };
+        // `/name args` naming a prompt template runs the template. Expanded
+        // here, where every front end (TUI, REPL, one-shot, ACP, web) meets.
+        let expanded = crate::extensions::expand_command(self.workspace.root(), prompt);
+        if expanded.is_some() {
+            sink.on_note(&format!(
+                "▪ running command {}",
+                prompt.split_whitespace().next().unwrap_or_default()
+            ));
+        }
         self.session.append_message(AgentMessage::User {
-            content: prompt.to_string(),
+            content: expanded.unwrap_or_else(|| prompt.to_string()),
             ts: now_ms(),
         });
         self.deliver_notices(sink);
+        if !self.hook_warnings_shown {
+            self.hook_warnings_shown = true;
+            for w in &self.hooks.warnings {
+                sink.on_note(&format!("▪ hooks: {w}"));
+            }
+        }
+        let mut stop_rounds = 0;
 
         for _ in 0..MAX_SAMPLES_PER_TURN {
             let specs = self.tool_specs();
@@ -544,44 +571,39 @@ impl Engine {
                 })
                 .collect();
             if calls.is_empty() {
+                // The model is done — unless a stop hook disagrees.
+                if self.hooks.has_stop()
+                    && stop_rounds < crate::hooks::STOP_HOOK_ROUNDS
+                    && !self.cancel_flag.load(Ordering::Relaxed)
+                    && let Verdict::Feedback(msg) = self.hooks.stop().await
+                {
+                    stop_rounds += 1;
+                    sink.on_note("▪ stop hook sent the model back");
+                    self.session.append_message(AgentMessage::User {
+                        content: format!(
+                            "A stop hook reported a problem with the work so far. Address it, \
+                             then finish:\n\n{msg}"
+                        ),
+                        ts: now_ms(),
+                    });
+                    continue;
+                }
                 break;
             }
-            for (id, name, args) in calls {
-                stats.tool_calls += 1;
-                sink.on_note(&format!("▶ {name} …"));
-                let t1 = Instant::now();
-                let out = self.execute_tool(&name, &args).await;
-                let tool_ms = t1.elapsed().as_millis() as u64;
-                self.trace.record_tool(&name, tool_ms, !out.is_error);
-                sink.on_tool(&ToolEvent {
-                    name: name.clone(),
-                    args_preview: args_preview(&args),
-                    content_preview: content_preview(&out.content),
-                    is_error: out.is_error,
-                    ms: tool_ms,
-                    content_len: out.content.len(),
-                });
-                self.session.append_message(AgentMessage::ToolResult {
-                    tool_call_id: id,
-                    tool_name: name,
-                    content: out.content,
-                    is_error: out.is_error,
-                    ts: now_ms(),
-                });
-            }
+            let cancelled = self.run_tool_calls(calls, &mut stats, sink).await;
             // Child exits and heartbeats land here between tool calls — the
             // whole point of the notice inbox. Delivering only at turn start
             // left a parent blind to its own children's reports for the rest of
             // a long turn, so it would go hunting the filesystem for them.
             self.deliver_notices(sink);
-            if self.cancel_flag.load(Ordering::Relaxed) {
+            if cancelled || self.cancel_flag.load(Ordering::Relaxed) {
                 stats.aborted = true;
                 sink.on_note("▪ turn cancelled");
                 break;
             }
-            if turn.stop_reason == StopReason::Length {
-                break;
-            }
+            // A `max_tokens` stop that still produced tool calls keeps going:
+            // any call it cut off got an error result, and the model deserves
+            // a sample to re-issue it rather than a silently dead turn.
         }
 
         if stats.samples >= MAX_SAMPLES_PER_TURN {
@@ -628,7 +650,136 @@ impl Engine {
         Ok(stats)
     }
 
+    /// Run one model turn's tool calls and journal every result, in call
+    /// order. Consecutive concurrency-safe calls run together; everything else
+    /// runs one at a time because it may prompt. A cancel interrupts the call
+    /// in flight (its future is dropped, which kills a running command) and
+    /// every call without a result gets one saying so — the transcript must
+    /// answer each `tool_use` or the next request is rejected. Returns whether
+    /// the turn was cancelled.
+    async fn run_tool_calls(
+        &mut self,
+        calls: Vec<(String, String, Value)>,
+        stats: &mut TurnStats,
+        sink: &mut dyn TurnSink,
+    ) -> bool {
+        let mut cancelled = false;
+        let mut i = 0;
+        while i < calls.len() {
+            let mut end = i + 1;
+            if self.is_concurrency_safe(&calls[i].1) {
+                while end < calls.len() && self.is_concurrency_safe(&calls[end].1) {
+                    end += 1;
+                }
+            }
+            let batch = &calls[i..end];
+            let outputs: Vec<(ToolOutput, u64)> = if cancelled {
+                batch
+                    .iter()
+                    .map(|_| (ToolOutput::error("not run: the turn was cancelled"), 0))
+                    .collect()
+            } else {
+                for (_, name, _) in batch {
+                    sink.on_note(&format!("▶ {name} …"));
+                }
+                let notify = self.cancel_notify.clone();
+                let flag = self.cancel_flag.clone();
+                let run = self.execute_batch(batch);
+                tokio::pin!(run);
+                loop {
+                    let notified = notify.notified();
+                    tokio::pin!(notified);
+                    tokio::select! {
+                        outs = &mut run => break outs,
+                        _ = &mut notified => {
+                            if flag.load(Ordering::Relaxed) {
+                                cancelled = true;
+                                break batch
+                                    .iter()
+                                    .map(|_| (ToolOutput::error("interrupted: the user cancelled the turn"), 0))
+                                    .collect();
+                            }
+                        }
+                    }
+                }
+            };
+            for ((id, name, args), (out, tool_ms)) in batch.iter().zip(outputs) {
+                stats.tool_calls += 1;
+                self.trace.record_tool(name, tool_ms, !out.is_error);
+                sink.on_tool(&ToolEvent {
+                    name: name.clone(),
+                    args_preview: args_preview(args),
+                    content_preview: content_preview(&out.content),
+                    is_error: out.is_error,
+                    ms: tool_ms,
+                    content_len: out.content.len(),
+                });
+                self.session.append_message(AgentMessage::ToolResult {
+                    tool_call_id: id.clone(),
+                    tool_name: name.clone(),
+                    content: out.content,
+                    is_error: out.is_error,
+                    ts: now_ms(),
+                });
+            }
+            i = end;
+        }
+        cancelled
+    }
+
+    fn is_concurrency_safe(&self, name: &str) -> bool {
+        self.tools
+            .iter()
+            .find(|t| t.spec().name == name)
+            .is_some_and(|t| t.concurrency_safe())
+    }
+
+    /// One call on its own (with the real gate), or a run of read-only calls
+    /// concurrently (each under [`crate::RefuseGate`]).
+    async fn execute_batch(&mut self, batch: &[(String, String, Value)]) -> Vec<(ToolOutput, u64)> {
+        let hooks = self.hooks.clone();
+        if let [(_, name, args)] = batch {
+            let t = Instant::now();
+            let out = match hooks.pre_tool(name, args).await {
+                Verdict::Feedback(msg) => ToolOutput::error(format!("blocked by a hook: {msg}")),
+                Verdict::Continue => self.execute_tool(name, args).await,
+            };
+            let out = with_post_hook(&hooks, name, args, out).await;
+            return vec![(out, t.elapsed().as_millis() as u64)];
+        }
+        let (workspace, artifacts, bus) = (&self.workspace, &self.artifacts, self.bus.as_deref());
+        let tools = &self.tools;
+        let hooks = &hooks;
+        let futs = batch.iter().map(|(_, name, args)| async move {
+            let t = Instant::now();
+            if let Verdict::Feedback(msg) = hooks.pre_tool(name, args).await {
+                let out = ToolOutput::error(format!("blocked by a hook: {msg}"));
+                return (out, t.elapsed().as_millis() as u64);
+            }
+            let out = match tools.iter().find(|tool| tool.spec().name == *name) {
+                Some(_) if args.get(crate::INVALID_INPUT_KEY).is_some() => invalid_input_error(),
+                Some(tool) => {
+                    let mut gate = crate::RefuseGate;
+                    let mut ctx = ToolCtx {
+                        workspace,
+                        gate: &mut gate,
+                        artifacts,
+                        bus,
+                    };
+                    tool.execute(args.clone(), &mut ctx).await
+                }
+                None => ToolOutput::error(format!("unknown tool: {name}")),
+            };
+            let out = with_post_hook(hooks, name, args, out).await;
+            (out, t.elapsed().as_millis() as u64)
+        });
+        futures_util::future::join_all(futs).await
+    }
+
     async fn execute_tool(&mut self, name: &str, args: &Value) -> ToolOutput {
+        if args.get(crate::INVALID_INPUT_KEY).is_some() {
+            return invalid_input_error();
+        }
         // Meta tool: the engine owns goal state, so this never reaches a Tool.
         if name == GOAL_COMPLETE_TOOL {
             return match self.session.goal() {
@@ -659,6 +810,29 @@ impl Engine {
         specs.sort_by(|a, b| a.name.cmp(&b.name));
         specs
     }
+}
+
+/// Append `post_tool` hook feedback to a tool's result.
+async fn with_post_hook(
+    hooks: &Hooks,
+    name: &str,
+    args: &Value,
+    mut out: ToolOutput,
+) -> ToolOutput {
+    if let Verdict::Feedback(msg) = hooks
+        .post_tool(name, args, &out.content, out.is_error)
+        .await
+    {
+        out.content.push_str(&format!("\n\n[hook feedback]\n{msg}"));
+    }
+    out
+}
+
+fn invalid_input_error() -> ToolOutput {
+    ToolOutput::error(
+        "tool input was not valid JSON (most likely cut off by the output token limit); \
+         nothing was run. Re-issue the call — for large content, split it into smaller edits.",
+    )
 }
 
 /// Last `cap` chars, on a char boundary — the end of gate output is the

@@ -95,3 +95,15 @@ Legend: ✓ has it · ✗ does not · partial = has some of it.
 8. ~~ACP server / web UI~~ **both landed 2026-09-20** (`docs/plan-p11-gaps.md`):
    ACP on stdio for editors and a localhost browser client, each a thin front end
    on the daemon rather than a second implementation.
+
+## Update 2026-09-23 (docs/plan-p13-parity.md)
+
+Rows that changed for us:
+
+- **OS-level sandboxing**: ✗ → ✓ (`HARNESS_SANDBOX`: Seatbelt on macOS, bwrap on Linux).
+- **extensions / plugins / skills**: ✗ → ✓ for prompt templates, skills (progressive
+  disclosure) and pre/post/stop hooks, `.claude/`-compatible. Still no compiled
+  plugin API; MCP remains the tool-extension surface.
+- **shareable workflow packages**: ✗ → partial (templates + skills are files you can share).
+- **code search**: native gitignore-aware `grep`/`glob`, parallel and prompt-free.
+- **prompt caching**: the conversation tail is now cached (before: system + tools only).

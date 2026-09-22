@@ -66,6 +66,10 @@ impl Tool for WebFetchTool {
         }
     }
 
+    fn concurrency_safe(&self) -> bool {
+        true
+    }
+
     async fn execute(&self, args: Value, _ctx: &mut ToolCtx<'_>) -> ToolOutput {
         let Some(url) = args["url"].as_str() else {
             return ToolOutput::error("missing `url`");

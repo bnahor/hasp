@@ -48,9 +48,7 @@ fn parse_script(raw: &str) -> Option<VecDeque<AssistantTurn>> {
     };
     for item in items {
         if let Some(thought) = item["thinking"].as_str() {
-            let mut blocks = vec![ContentBlock::Thinking {
-                thinking: thought.into(),
-            }];
+            let mut blocks = vec![ContentBlock::thinking(thought)];
             if let Some(text) = item["text"].as_str() {
                 blocks.push(ContentBlock::Text { text: text.into() });
             }
@@ -114,7 +112,7 @@ impl Provider for EchoProvider {
             for block in &turn.blocks {
                 let (text, thinking) = match block {
                     ContentBlock::Text { text } => (Some(text), false),
-                    ContentBlock::Thinking { thinking } => (Some(thinking), true),
+                    ContentBlock::Thinking { thinking, .. } => (Some(thinking), true),
                     _ => (None, false),
                 };
                 if let Some(text) = text {

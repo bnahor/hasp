@@ -7,6 +7,8 @@ license.workspace = true
 [dependencies]
 harness-core = { workspace = true }
 regex = "1"
+ignore = "0.4"
+globset = "0.4"
 reqwest = { workspace = true }
 async-trait = { workspace = true }
 serde_json = { workspace = true }

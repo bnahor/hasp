@@ -48,8 +48,72 @@ Inside the TUI:
 | `/model [id]`, `/stats`, `/name <text>`, `/new`, `/clear`, `/exit` | the rest |
 | `/theme light\|dark` | color palette (`HARNESS_THEME` sets the default); dark is the historical look |
 
+Any `/name` that is not built in runs a prompt template (below); they show in
+`/help` and tab-completion.
+
 Keys: `enter` send · `ctrl+j` newline · `esc` cancel a turn · `↑`/`↓` history ·
 `pgup`/`pgdn` scroll · `ctrl+c` exit.
+
+## Tools
+
+`read`, `write`, `edit`, `bash`, `grep`, `glob`, `todo`, `web_fetch`,
+`symbol_search`, plus `skill` when skills are installed and the agent-bus
+tools below.
+
+- **`grep` / `glob`** use ripgrep's own walker in process: gitignore-aware,
+  confined, capped, newest files first, and never an approval prompt.
+- **Read-only calls run in parallel.** When the model batches independent
+  reads and searches into one response, they run concurrently.
+- **`esc` interrupts a running tool** (a hung `cargo test` included, whole
+  process group). Every call still gets a result, so the transcript stays valid.
+- `bash` keeps the head *and tail* of long output (where errors and test
+  summaries are), keeps partial output on timeout, and survives non-UTF-8.
+  `read` caps long lines and total size, refuses binaries, and lists
+  directories. `edit` falls back to CRLF- and whitespace-tolerant matching,
+  only when the match is unique.
+
+## Commands, skills and hooks
+
+Plain files, laid out so an existing Claude Code collection works unchanged.
+Project beats home, `.harness` beats `.claude`:
+
+- **Prompt templates**: `.harness/commands/review.md` (or `.claude/commands/…`,
+  `~/.harness/commands/…`, `~/.claude/commands/…`) runs as `/review <args>`.
+  `$ARGUMENTS` and `$1`…`$9` are substituted; `description:` front matter
+  shows in completion; `git/pr.md` becomes `/git:pr`. They work in every front
+  end (TUI, REPL, `-p`, ACP, web) because the engine expands them.
+- **Skills**: `.harness/skills/<name>/SKILL.md` (or `.claude/skills/…`, and
+  the home-directory twins) with `name:` and `description:` front matter. Only
+  names and descriptions are in context. The model loads a skill's body, and
+  any supporting file in its directory, through the `skill` tool when a task
+  calls for it.
+- **Hooks**: `~/.harness/hooks.json`, and `.harness/hooks.json` once you run
+  `harness trust` in the project (a cloned repo's hooks never run on their
+  own):
+
+  ```json
+  {"pre_tool":  [{"match": "bash", "command": "./scripts/policy.sh"}],
+   "post_tool": [{"match": "edit|write", "command": "cargo fmt 2>&1 | tail -5"}],
+   "stop":      [{"command": "cargo check -q 2>&1 | tail -20"}]}
+  ```
+
+  Hooks get a JSON event on stdin. Exit 2 is how a hook talks to the model: a
+  `pre_tool` hook blocks the call (hooks can refuse, never approve), a
+  `post_tool` hook appends feedback to the result, and a `stop` hook sends the
+  model back to fix what it found (up to 3 times per turn).
+
+`harness doctor` lists what it found.
+
+## Sandbox
+
+`HARNESS_SANDBOX=workspace-write` runs every `bash` command under the OS
+sandbox (`sandbox-exec` on macOS, `bwrap` on Linux), so it can write only to
+the workspace, the temp directories and `HARNESS_SANDBOX_WRITABLE`
+(colon-separated). `read-only` allows temp writes only, and
+`HARNESS_SANDBOX_NETWORK=deny` also cuts the network. If the platform tool is
+missing, commands are refused with a message rather than run unsandboxed.
+Approvals still apply on top. The sandbox limits what an approved command can
+do, and it is what makes a long `--yolo` run reasonable.
 
 ## Agent bus
 
@@ -146,6 +210,8 @@ or `~/.harness/daemon.sock`.
 
 ## Environment
 
+`HARNESS_EFFORT` (`low`…`max`; Claude models default to `xhigh` where
+supported), `HARNESS_THINKING=off`, `HARNESS_SANDBOX*` (above),
 `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL`, `ZAI_API_KEY`, `DEEPSEEK_API_KEY`,
 `HARNESS_PROVIDER` (`anthropic` | `zai` | `deepseek` | `ollama` | `compat` |
 `mock`), `HARNESS_SOCKET`, `HARNESS_MOCK_DELAY_MS`, `HARNESS_THEME`
@@ -163,12 +229,18 @@ model is used.
 
 Providers other than Anthropic are driven through their Anthropic-compatible
 endpoints, so the same client, streaming, tool-calling and cache breakpoints
-apply. DeepSeek defaults to `deepseek-v4-pro`; `--model deepseek-flash` is ~4×
+apply. Requests carry four cache breakpoints (tools, system, and two on the
+conversation tail), so a long agent session re-reads its history from cache
+instead of paying full price for it every sample. Signed thinking is sent back
+unchanged to the model that produced it, which models that think across tool
+calls require. On first-party Claude models, adaptive thinking and an effort
+level are set per request, so `/model` can switch between model generations
+mid-session. The output ceiling follows the model (up to 64k). DeepSeek defaults to `deepseek-v4-pro`; `--model deepseek-flash` is ~4×
 cheaper.
 
 ## Tests and CI
 
-`cargo test --workspace` (143 tests) plus `cargo fmt --all --check` and
+`cargo test --workspace` (167 tests) plus `cargo fmt --all --check` and
 `cargo clippy --workspace --all-targets -- -D warnings`, which
 `.github/workflows/ci.yml` runs on macOS and Linux. Tagging `vX.Y.Z` builds
 binaries for both macOS architectures and Linux via `release.yml`, and

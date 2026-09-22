@@ -3,7 +3,6 @@ use harness_core::engine::{Engine, TurnSink};
 use harness_core::session::SessionManager;
 use harness_core::{Sink, Usage};
 use harness_provider::catalog;
-use harness_tools::builtins;
 use harness_workspace::Workspace;
 use serde_json::json;
 use std::io::{IsTerminal, Write};
@@ -26,8 +25,7 @@ mod web;
 
 use gate::{GateCore, PlainGate, TuiGate};
 
-const DEFAULT_MODEL: &str = "claude-sonnet-4-5";
-const MAX_OUTPUT_TOKENS: u32 = 16384;
+const DEFAULT_MODEL: &str = "claude-opus-5";
 
 struct PrintSink;
 
@@ -77,6 +75,19 @@ async fn main() -> Result<()> {
             return creds::login_interactive(provider);
         }
         Some("doctor") => return doctor().await,
+        Some("trust") => {
+            let ws = Workspace::resolve(&std::env::current_dir()?)?;
+            let root = ws.root();
+            if harness_core::hooks::trust(root)? {
+                println!(
+                    "trusted {} — its .harness/hooks.json will run",
+                    root.display()
+                );
+            } else {
+                println!("{} is already trusted", root.display());
+            }
+            return Ok(());
+        }
         Some("sessions") => return sessions_cmd(&argv[1..]).await,
         Some("web") => {
             let port: u16 = match argv.get(1) {
@@ -584,7 +595,7 @@ async fn embedded_engine_with_bus(
         };
     // MCP servers contribute tools alongside the built-ins; the engine keeps
     // the combined list name-sorted (cache contract).
-    let mut tools = builtins();
+    let mut tools = harness_tools::builtins_for(ws.root());
     tools.extend(harness_mcp::tools_for(&ws).await);
     let mut engine = Engine::new(
         ws.clone(),
@@ -593,12 +604,12 @@ async fn embedded_engine_with_bus(
         tools,
         parent_gate,
         model.clone(),
-        MAX_OUTPUT_TOKENS,
+        harness_provider::max_output_for(&model),
     )?;
     let bus = Arc::new(harness_bus::LocalBus::new(
         ws,
-        model,
-        MAX_OUTPUT_TOKENS,
+        model.clone(),
+        harness_provider::max_output_for(&model),
         provider_factory.clone(),
         child_gate_factory,
         engine.notice_inbox(),
@@ -870,6 +881,7 @@ async fn plain_repl(
                 if known || dynamic {
                     let mut eng = engine.lock().await;
                     eng.model = id.to_string();
+                    eng.max_tokens = harness_provider::max_output_for(id);
                     let provider = eng.provider.name();
                     eng.session.append_model_change(provider, id);
                     eprintln!("▪ model → {id}");
@@ -1243,6 +1255,43 @@ async fn doctor() -> Result<()> {
             "               dev build — install with: cargo install --path {}",
             repo.display()
         );
+    }
+    if let Ok(ws) = Workspace::resolve(&std::env::current_dir()?) {
+        let root = ws.root();
+        let names = |v: Vec<String>| {
+            if v.is_empty() {
+                "none".to_string()
+            } else {
+                v.join(", ")
+            }
+        };
+        let commands = harness_core::extensions::commands(root)
+            .into_iter()
+            .map(|c| format!("/{}", c.name))
+            .collect();
+        let skills = harness_core::extensions::skills(root)
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        println!("  commands:    {}", names(commands));
+        println!("  skills:      {}", names(skills));
+        let hooks = harness_core::hooks::Hooks::load(root);
+        println!(
+            "  hooks:       {}{}",
+            if hooks.is_empty() { "none" } else { "loaded" },
+            if harness_core::hooks::is_trusted(root) {
+                " (project trusted)"
+            } else {
+                ""
+            }
+        );
+        for w in &hooks.warnings {
+            println!("               {w}");
+        }
+    }
+    match harness_tools::sandbox::Mode::from_env() {
+        Ok(m) => println!("  sandbox:     {} (HARNESS_SANDBOX)", m.label()),
+        Err(e) => println!("  sandbox:     INVALID — {e}"),
     }
     let stored = creds::load();
     let credential_path = creds::path()?;
