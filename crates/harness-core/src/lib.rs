@@ -9,6 +9,7 @@ pub mod engine;
 pub mod extensions;
 pub mod hooks;
 pub mod image;
+pub mod process;
 pub mod session;
 pub mod trace;
 

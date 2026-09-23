@@ -1017,12 +1017,8 @@ async fn run_gate(root: &std::path::Path, cmd: &str) -> (bool, String) {
             (out.status.success(), tail(&text, GATE_OUTPUT_CAP))
         }
         _ => {
-            #[cfg(unix)]
             if let Some(pid) = pid {
-                let _ = std::process::Command::new("kill")
-                    .arg("-TERM")
-                    .arg(format!("-{pid}"))
-                    .status();
+                crate::process::signal_group(pid, crate::process::SIGTERM);
             }
             (
                 false,

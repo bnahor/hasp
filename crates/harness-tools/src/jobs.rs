@@ -73,32 +73,22 @@ impl Drop for JobTable {
 /// How long a job gets to exit on SIGTERM before its group is SIGKILLed.
 const KILL_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
-#[cfg(unix)]
-fn signal_group(pid: u32, signal: &str) {
-    let _ = std::process::Command::new("kill")
-        .args([signal, "--", &format!("-{pid}")])
-        .stderr(std::process::Stdio::null())
-        .status();
-}
-
 /// SIGTERM the job's process group, then SIGKILL it after [`KILL_GRACE`]: a
 /// server that traps or ignores TERM (graceful shutdown, or a shell `trap`)
 /// must still be gone. The escalation runs on its own thread so neither a
 /// tool call nor a session's teardown waits for it.
-#[cfg(unix)]
 fn kill_group(pid: Option<u32>) {
+    use harness_core::process::{SIGKILL, SIGTERM, signal_group};
     let Some(pid) = pid else {
         return;
     };
-    signal_group(pid, "-TERM");
-    std::thread::spawn(move || {
-        std::thread::sleep(KILL_GRACE);
-        signal_group(pid, "-KILL");
-    });
+    if signal_group(pid, SIGTERM) {
+        std::thread::spawn(move || {
+            std::thread::sleep(KILL_GRACE);
+            signal_group(pid, SIGKILL);
+        });
+    }
 }
-
-#[cfg(not(unix))]
-fn kill_group(_: Option<u32>) {}
 
 impl JobTable {
     fn running(&self) -> usize {

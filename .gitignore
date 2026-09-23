@@ -2,3 +2,10 @@
 .harness/
 __pycache__/
 .DS_Store
+bench/swebench/.venv/
+bench/swebench/harness-linux-amd64
+bench/swebench/verified.jsonl
+bench/swebench/runs/
+bench/swebench/logs/
+bench/swebench/reports/
+bench/swebench/build.log

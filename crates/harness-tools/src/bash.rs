@@ -203,18 +203,11 @@ fn ceil_boundary(s: &str, mut i: usize) -> usize {
     i
 }
 
-#[cfg(unix)]
 fn kill_group(pid: Option<u32>) {
     if let Some(pid) = pid {
-        let _ = std::process::Command::new("kill")
-            .args(["-KILL", &format!("-{pid}")])
-            .stderr(std::process::Stdio::null())
-            .status();
+        harness_core::process::signal_group(pid, harness_core::process::SIGKILL);
     }
 }
-
-#[cfg(not(unix))]
-fn kill_group(_: Option<u32>) {}
 
 /// Kills the command's process group when dropped. A finished group is
 /// already gone, so the kill is a harmless no-op then.
