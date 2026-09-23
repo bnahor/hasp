@@ -70,14 +70,31 @@ impl Drop for JobTable {
     }
 }
 
+/// How long a job gets to exit on SIGTERM before its group is SIGKILLed.
+const KILL_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+#[cfg(unix)]
+fn signal_group(pid: u32, signal: &str) {
+    let _ = std::process::Command::new("kill")
+        .args([signal, "--", &format!("-{pid}")])
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+/// SIGTERM the job's process group, then SIGKILL it after [`KILL_GRACE`]: a
+/// server that traps or ignores TERM (graceful shutdown, or a shell `trap`)
+/// must still be gone. The escalation runs on its own thread so neither a
+/// tool call nor a session's teardown waits for it.
 #[cfg(unix)]
 fn kill_group(pid: Option<u32>) {
-    if let Some(pid) = pid {
-        let _ = std::process::Command::new("kill")
-            .args(["-TERM", &format!("-{pid}")])
-            .stderr(std::process::Stdio::null())
-            .status();
-    }
+    let Some(pid) = pid else {
+        return;
+    };
+    signal_group(pid, "-TERM");
+    std::thread::spawn(move || {
+        std::thread::sleep(KILL_GRACE);
+        signal_group(pid, "-KILL");
+    });
 }
 
 #[cfg(not(unix))]
@@ -305,7 +322,8 @@ mod tests {
     /// Wait (generously — CI runners are slow under parallel tests) for `pid`
     /// to stop running.
     async fn gone(pid: u32) -> bool {
-        for _ in 0..100 {
+        // KILL_GRACE, then time for the SIGKILL to land on a slow runner.
+        for _ in 0..160 {
             if !alive(pid) {
                 return true;
             }
@@ -394,9 +412,19 @@ mod tests {
         assert_eq!(out.content, "job 1 killed");
         assert!(gone(pid).await, "killed job's process is gone");
 
+        // A job that ignores SIGTERM is SIGKILLed after the grace period.
+        jobs.start("trap '' TERM; sleep 30 & wait", &ctx).unwrap();
+        let pid = jobs.jobs.lock().unwrap()[&2].pid.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        tool.execute(json!({"action": "kill", "id": 2}), &mut ctx)
+            .await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(alive(pid), "TERM alone does not stop it");
+        assert!(gone(pid).await, "SIGKILL after the grace period does");
+
         // A grandchild in the job's group dies with the session's table too.
         jobs.start("sleep 30 & wait", &ctx).unwrap();
-        let pid = jobs.jobs.lock().unwrap()[&2].pid.unwrap();
+        let pid = jobs.jobs.lock().unwrap()[&3].pid.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
         drop(tool);
         drop(jobs);
