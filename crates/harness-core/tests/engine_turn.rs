@@ -885,3 +885,120 @@ async fn a_prompt_template_expands_before_it_reaches_the_model() {
         "{first:?}"
     );
 }
+
+/// Fails the first `fail` calls with `err`, then answers.
+struct Flaky {
+    calls: std::sync::atomic::AtomicUsize,
+    fail: usize,
+    transient: bool,
+}
+
+#[async_trait::async_trait]
+impl harness_core::Provider for Flaky {
+    fn name(&self) -> &'static str {
+        "flaky"
+    }
+    fn context_window(&self) -> usize {
+        200_000
+    }
+    async fn complete(
+        &self,
+        _req: &harness_core::ModelRequest,
+        sink: &mut dyn Sink,
+    ) -> Result<harness_core::AssistantTurn, harness_core::ProviderError> {
+        let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if n < self.fail {
+            sink.on_delta("partial…");
+            return Err(if self.transient {
+                harness_core::ProviderError::Transport("stream ended before message_stop".into())
+            } else {
+                harness_core::ProviderError::Api {
+                    status: 400,
+                    body: "bad request".into(),
+                }
+            });
+        }
+        Ok(turn(
+            vec![ContentBlock::Text {
+                text: "recovered".into(),
+            }],
+            StopReason::Stop,
+        ))
+    }
+}
+
+fn engine_with(tmp: &std::path::Path, provider: Flaky) -> Engine {
+    let ws = Workspace::resolve(tmp).unwrap();
+    let session = SessionManager::in_memory(&ws);
+    Engine::new(
+        ws,
+        session,
+        Box::new(provider),
+        vec![],
+        Box::new(AllowGate),
+        "m".into(),
+        1024,
+    )
+    .unwrap()
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_broken_stream_retries_the_sample_not_the_task() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut engine = engine_with(
+        tmp.path(),
+        Flaky {
+            calls: Default::default(),
+            fail: 2,
+            transient: true,
+        },
+    );
+    let mut sink = NoteSink(vec![]);
+    let stats = engine.run_turn("go", &mut sink).await.unwrap();
+    assert_eq!(stats.samples, 1);
+    assert!(
+        sink.0.iter().any(|n| n.contains("retrying the sample")),
+        "{:?}",
+        sink.0
+    );
+    // Only the successful sample is journaled.
+    let assistants: Vec<_> = engine
+        .session
+        .context_messages()
+        .into_iter()
+        .filter(|m| matches!(m, AgentMessage::Assistant { .. }))
+        .collect();
+    assert_eq!(assistants.len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn retries_are_capped_and_client_errors_are_not_retried() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut engine = engine_with(
+        tmp.path(),
+        Flaky {
+            calls: Default::default(),
+            fail: 99,
+            transient: true,
+        },
+    );
+    let Err(err) = engine.run_turn("go", &mut NoteSink(vec![])).await else {
+        panic!("four broken streams in a row fail the turn");
+    };
+    assert!(err.to_string().contains("message_stop"), "{err}");
+
+    let mut engine = engine_with(
+        tmp.path(),
+        Flaky {
+            calls: Default::default(),
+            fail: 1,
+            transient: false,
+        },
+    );
+    let mut sink = NoteSink(vec![]);
+    assert!(engine.run_turn("go", &mut sink).await.is_err());
+    assert!(
+        !sink.0.iter().any(|n| n.contains("retrying")),
+        "a 400 fails fast"
+    );
+}

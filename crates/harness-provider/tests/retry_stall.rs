@@ -204,3 +204,34 @@ async fn the_compat_endpoint_retries_server_errors() {
     assert_eq!(turn.stop_reason, harness_core::StopReason::Stop);
     assert_eq!(server.join().unwrap(), 2);
 }
+
+/// A body that stops before `message_stop` is a cut connection, and an
+/// `event: error` after the 200 is a failure — neither may come back as a
+/// (truncated) successful turn. Both are transient, so the engine retries.
+#[tokio::test]
+async fn truncated_streams_and_mid_stream_errors_are_transient_failures() {
+    let full = anthropic_turn("cut short");
+    let truncated = full[..full.find("event: message_delta").unwrap()].to_string();
+    let overloaded = format!(
+        "{}event: error\ndata: {{\"type\":\"error\",\"error\":{{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}}}\n\n",
+        truncated
+    );
+    for (body, want) in [
+        (truncated, "message_stop"),
+        (overloaded, "overloaded_error"),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = scripted_server(listener, vec![("200 OK", body, vec![])], false);
+        let client = Anthropic::new("key".into(), "m".into())
+            .with_base_url(&format!("http://{addr}"))
+            .with_retry_base(10);
+        let err = match client.complete(&request(), &mut Rec(String::new())).await {
+            Ok(t) => panic!("accepted a cut stream as a turn: {:?}", t.blocks),
+            Err(e) => e,
+        };
+        assert!(err.to_string().contains(want), "{err}");
+        assert!(err.is_transient(), "{err}");
+        server.join().unwrap();
+    }
+}

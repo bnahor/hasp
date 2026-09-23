@@ -39,6 +39,10 @@ pub const GOAL_CONTINUATION_CAP: u64 = 100;
 /// money before anyone notices. `--unlimited` opts out deliberately.
 pub const GOAL_DEFAULT_BUDGET_TOKENS: u64 = 2_000_000;
 const CHILD_POLL_MS: u64 = 250;
+/// Retries of one sample after a transient provider failure (backoff 4, 8,
+/// 16 s). Before anything streams, the provider clients retry on their own;
+/// this covers what they cannot: a stream that breaks partway.
+pub const SAMPLE_RETRIES: u32 = 3;
 const GATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 const GATE_OUTPUT_CAP: usize = 2000;
 pub const GOAL_COMPLETE_TOOL: &str = "goal_complete";
@@ -648,40 +652,64 @@ pub async fn run_turn_shared<C: EngineCell>(
             (eng.build_request(), eng.provider.clone())
         };
         let t0 = Instant::now();
-        let outcome = {
-            let sink_base: &mut dyn Sink = sink;
-            let fut = provider.complete(&req, sink_base);
-            tokio::pin!(fut);
-            loop {
-                let notified = cancel_notify.notified();
-                tokio::pin!(notified);
-                tokio::select! {
-                    t = &mut fut => break Some(t),
-                    _ = &mut notified => {
-                        // Stale permits (e.g. a cancel that raced turn-start
-                        // and was reset) just re-check the flag and keep
-                        // polling the same sample.
-                        if cancel_flag.load(Ordering::Relaxed) {
-                            break None;
+        let mut attempt = 0;
+        let turn = loop {
+            let outcome = {
+                let sink_base: &mut dyn Sink = sink;
+                let fut = provider.complete(&req, sink_base);
+                tokio::pin!(fut);
+                loop {
+                    let notified = cancel_notify.notified();
+                    tokio::pin!(notified);
+                    tokio::select! {
+                        t = &mut fut => break Some(t),
+                        _ = &mut notified => {
+                            // Stale permits (e.g. a cancel that raced turn-start
+                            // and was reset) just re-check the flag and keep
+                            // polling the same sample.
+                            if cancel_flag.load(Ordering::Relaxed) {
+                                break None;
+                            }
                         }
+                    }
+                }
+            };
+            match outcome {
+                None => break None,
+                Some(Ok(t)) => break Some(t),
+                Some(Err(e)) => {
+                    cell.lock().await.trace.record(json!({
+                        "event": "api_error", "provider": provider.name(),
+                        "error": e.to_string(), "ms": t0.elapsed().as_millis() as u64,
+                        "attempt": attempt + 1,
+                    }));
+                    // Nothing of a failed sample is journaled, so it can be
+                    // re-issued as-is. A dropped stream an hour into a task
+                    // must not throw the task away.
+                    if !e.is_transient() || attempt >= SAMPLE_RETRIES {
+                        return Err(e.into());
+                    }
+                    attempt += 1;
+                    let wait = std::time::Duration::from_secs(2u64 << attempt);
+                    sink.on_note(&format!(
+                        "▪ provider error ({e}) — retrying the sample in {}s ({attempt}/{SAMPLE_RETRIES})",
+                        wait.as_secs()
+                    ));
+                    let notified = cancel_notify.notified();
+                    tokio::select! {
+                        _ = tokio::time::sleep(wait) => {}
+                        _ = notified => {}
+                    }
+                    if cancel_flag.load(Ordering::Relaxed) {
+                        break None;
                     }
                 }
             }
         };
-        let turn = match outcome {
-            None => {
-                stats.aborted = true;
-                sink.on_note("▪ turn cancelled");
-                break;
-            }
-            Some(Err(e)) => {
-                cell.lock().await.trace.record(json!({
-                    "event": "api_error", "provider": provider.name(),
-                    "error": e.to_string(), "ms": t0.elapsed().as_millis() as u64,
-                }));
-                return Err(e.into());
-            }
-            Some(Ok(t)) => t,
+        let Some(turn) = turn else {
+            stats.aborted = true;
+            sink.on_note("▪ turn cancelled");
+            break;
         };
         let api_ms = t0.elapsed().as_millis() as u64;
         stats.samples += 1;

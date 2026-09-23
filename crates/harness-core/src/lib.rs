@@ -286,6 +286,20 @@ pub enum ProviderError {
     Protocol(String),
 }
 
+impl ProviderError {
+    /// Worth another try: a dropped or stalled stream, a garbled event, rate
+    /// limits and server-side failures. A 4xx other than those would fail the
+    /// same way again.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            ProviderError::Transport(_) | ProviderError::Protocol(_) => true,
+            ProviderError::Api { status, .. } => {
+                matches!(status, 408 | 409 | 425 | 429 | 500..=599)
+            }
+        }
+    }
+}
+
 #[async_trait::async_trait]
 pub trait Provider: Send + Sync {
     fn name(&self) -> &'static str;

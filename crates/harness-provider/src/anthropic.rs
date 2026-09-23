@@ -475,7 +475,14 @@ impl Provider for Anthropic {
                         self.stall.as_secs()
                     )));
                 }
-                Ok(None) => break,
+                // A body that ends before `message_stop` is a cut connection,
+                // not a finished answer: returning it would journal a
+                // truncated turn as if the model had meant it.
+                Ok(None) => {
+                    return Err(ProviderError::Transport(
+                        "stream ended before message_stop".into(),
+                    ));
+                }
                 Ok(Some(c)) => c.map_err(|e| ProviderError::Transport(e.to_string()))?,
             };
             for data in sse.feed(&chunk) {
@@ -559,6 +566,21 @@ impl Provider for Anthropic {
                         }
                     }
                     "message_stop" => done = true,
+                    // Mid-stream failure (e.g. `overloaded_error`) after the
+                    // HTTP 200: surface it so the engine can retry the sample.
+                    "error" => {
+                        let kind = ev["error"]["type"].as_str().unwrap_or("error");
+                        let status = match kind {
+                            "overloaded_error" => 529,
+                            "rate_limit_error" => 429,
+                            "api_error" => 500,
+                            _ => 400,
+                        };
+                        return Err(ProviderError::Api {
+                            status,
+                            body: ev.to_string(),
+                        });
+                    }
                     _ => {}
                 }
                 if done {
