@@ -289,12 +289,29 @@ mod tests {
         }
     }
 
+    /// Running, as opposed to gone or a zombie awaiting its reaper (which
+    /// `kill -0` would still report as alive on Linux).
     fn alive(pid: u32) -> bool {
-        std::process::Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
+        std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .is_ok_and(|o| {
+                let stat = String::from_utf8_lossy(&o.stdout);
+                let stat = stat.trim();
+                !stat.is_empty() && !stat.starts_with('Z')
+            })
+    }
+
+    /// Wait (generously — CI runners are slow under parallel tests) for `pid`
+    /// to stop running.
+    async fn gone(pid: u32) -> bool {
+        for _ in 0..100 {
+            if !alive(pid) {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        false
     }
 
     async fn settle(table: &JobTable, id: u32) {
@@ -375,8 +392,7 @@ mod tests {
             .execute(json!({"action": "kill", "id": 1}), &mut ctx)
             .await;
         assert_eq!(out.content, "job 1 killed");
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        assert!(!alive(pid), "killed job's process is gone");
+        assert!(gone(pid).await, "killed job's process is gone");
 
         // A grandchild in the job's group dies with the session's table too.
         jobs.start("sleep 30 & wait", &ctx).unwrap();
@@ -384,8 +400,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
         drop(tool);
         drop(jobs);
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        assert!(!alive(pid), "dropping the table stops running jobs");
+        assert!(gone(pid).await, "dropping the table stops running jobs");
     }
 
     #[tokio::test]

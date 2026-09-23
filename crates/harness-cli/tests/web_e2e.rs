@@ -7,14 +7,22 @@ use tokio::process::Command;
 
 /// Minimal HTTP over a socket: no client dependency, and the page's needs are
 /// one GET, one POST and one stream.
-async fn http(port: u16, request: &str) -> (u16, String) {
+async fn http(home: &std::path::Path, port: u16, request: &str) -> (u16, String) {
     let mut s = TcpStream::connect(("127.0.0.1", port))
         .await
         .expect("connect");
     s.write_all(request.as_bytes()).await.unwrap();
     s.flush().await.unwrap();
     let mut raw = Vec::new();
-    s.read_to_end(&mut raw).await.unwrap();
+    if let Err(e) = s.read_to_end(&mut raw).await {
+        // A reset here once failed CI with nothing else to go on: say which
+        // request it was and what the server logged.
+        let stderr = std::fs::read_to_string(home.join("web.stderr")).unwrap_or_default();
+        panic!(
+            "{e} on `{}`; server stderr:\n{stderr}",
+            request.lines().next().unwrap_or_default()
+        );
+    }
     let text = String::from_utf8_lossy(&raw).to_string();
     let status = text
         .split_whitespace()
@@ -50,7 +58,8 @@ async fn start_web() -> (tokio::process::Child, u16, String, tempfile::TempDir) 
         .env("HARNESS_PROVIDER", "mock")
         .env("HARNESS_SOCKET", home.path().join("web.sock"))
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
+        // Kept in a file so a failure can say what the server said.
+        .stderr(std::fs::File::create(home.path().join("web.stderr")).unwrap());
     let mut child = cmd.spawn().expect("spawn harness web");
     let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
     let line = tokio::time::timeout(Duration::from_secs(60), lines.next_line())
@@ -75,19 +84,20 @@ async fn start_web() -> (tokio::process::Child, u16, String, tempfile::TempDir) 
 
 #[tokio::test]
 async fn serves_the_page_and_drives_a_turn() {
-    let (mut child, port, token, _home) = start_web().await;
+    let (mut child, port, token, home) = start_web().await;
 
     // No token, no service — a local port is not an authorization.
-    let (status, _) = http(port, &get("/")).await;
+    let (status, _) = http(home.path(), port, &get("/")).await;
     assert_eq!(status, 401);
 
-    let (status, page) = http(port, &get(&format!("/?token={token}"))).await;
+    let (status, page) = http(home.path(), port, &get(&format!("/?token={token}"))).await;
     assert_eq!(status, 200);
     assert!(page.contains("harness"), "the page is served");
     assert!(page.contains("composer"), "and it is the app, not a stub");
 
     // The session is already open on this directory: stats answer immediately.
     let (status, body) = http(
+        home.path(),
         port,
         &post(
             &format!("/rpc?token={token}"),
@@ -102,6 +112,7 @@ async fn serves_the_page_and_drives_a_turn() {
 
     // A prompt runs the real turn through the daemon.
     let (_, body) = http(
+        home.path(),
         port,
         &post(
             &format!("/rpc?token={token}"),
@@ -122,6 +133,7 @@ async fn serves_the_page_and_drives_a_turn() {
 
     // History replays for a freshly loaded page.
     let (_, body) = http(
+        home.path(),
         port,
         &post(
             &format!("/rpc?token={token}"),
