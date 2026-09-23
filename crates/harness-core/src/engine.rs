@@ -28,7 +28,12 @@ use crate::{
     Provider, Sink, Tool, ToolCtx, ToolOutput, ToolSpec, Usage,
 };
 
-pub const MAX_SAMPLES_PER_TURN: usize = 50;
+/// Model calls one prompt may make before the turn stops. A backstop against
+/// a runaway loop, not a budget: goal and autonomous modes have their own
+/// token budgets, and a user can cancel at any time. 50 was too tight for
+/// real work — on SWE-bench Verified 22% of tasks reached it (4 of 104 failed
+/// there); reference agents allow 250 steps.
+pub const MAX_SAMPLES_PER_TURN: usize = 250;
 pub const COMPACT_WARN_AT: f64 = 0.85;
 const NOTICE_DRAIN_CAP: usize = 8;
 /// Hard stop on goal continuations even with no token budget — the model may
