@@ -207,3 +207,37 @@ async fn streams_assistant_deltas_over_sse() {
 
     let _ = child.kill().await;
 }
+
+/// Whoever reads the banner may close the pipe (`harness web | head -1`). A
+/// `println!` into the closed pipe used to panic and take the server down,
+/// which on Linux CI surfaced as a connection reset in the test above.
+#[tokio::test]
+async fn server_survives_its_stdout_being_closed() {
+    let home = tempfile::tempdir().unwrap();
+    let port = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+    let mut child = Command::new(env!("CARGO_BIN_EXE_harness"))
+        .arg("web")
+        .arg(port.to_string())
+        .env("HOME", home.path())
+        .env("HARNESS_PROVIDER", "mock")
+        .env("HARNESS_SOCKET", home.path().join("web.sock"))
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::fs::File::create(home.path().join("web.stderr")).unwrap())
+        .spawn()
+        .expect("spawn harness web");
+    drop(child.stdout.take()); // closed before the banner is written
+    let mut status = 0;
+    for _ in 0..200 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        if TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
+            status = http(home.path(), port, &get("/")).await.0;
+            break;
+        }
+    }
+    assert_eq!(status, 401, "server is up and answering (no token → 401)");
+    assert!(child.try_wait().unwrap().is_none(), "and still running");
+    let _ = child.kill().await;
+}

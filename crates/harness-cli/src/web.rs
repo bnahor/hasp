@@ -212,8 +212,19 @@ pub async fn serve(port: u16) -> Result<()> {
         .with_context(|| format!("binding 127.0.0.1:{port}"))?;
     let bound = listener.local_addr()?.port();
     let token = token();
-    println!("harness web → http://127.0.0.1:{bound}/?token={token}");
-    println!("  localhost only · token required · one session (this directory)");
+    // Written once, errors ignored: whoever reads the banner may close the
+    // pipe after the URL line (`harness web | head -1`, a test harness), and a
+    // `println!` into a closed pipe panics — which took the server down with it.
+    {
+        use std::io::Write;
+        let mut out = std::io::stdout().lock();
+        let _ = write!(
+            out,
+            "harness web → http://127.0.0.1:{bound}/?token={token}\n  \
+             localhost only · token required · one session (this directory)\n"
+        );
+        let _ = out.flush();
+    }
 
     let token = Arc::new(token);
     loop {
