@@ -133,6 +133,7 @@ cpus    = 2
 memory  = "4G"
 pids    = 512
 network = "none"                 # or "full" (default)
+runtime = "runsc"                # optional: gVisor; or a Kata microVM runtime
 setup   = ["pip install -e ."]   # once, as root, before the agent starts
 [env]
 PYTHONDONTWRITEBYTECODE = "1"
@@ -144,6 +145,11 @@ harness env check py312          # start it, print the limits the kernel enforce
 harness --env py312              # this session's tools run inside it (also HARNESS_ENV)
 harness env list | prune         # definitions · remove containers whose session died
 ```
+
+`runtime` picks the container runtime: the default (`runc`, a shared
+kernel), `runsc` (gVisor: about +12% on a whole agent session and 19 MB per
+sandbox, measured in `docs/runtime-benchmark.md`), or a Kata runtime (a
+microVM per container, which needs bare-metal Linux to be practical).
 
 `read`, `write`, `edit`, `bash`, `job`, `grep`, `glob` and `symbol_search`
 run **inside** the environment. The session journal, the model connection,

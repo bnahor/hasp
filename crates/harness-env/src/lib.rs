@@ -54,6 +54,11 @@ const CONCURRENCY_SAFE: &[&str] = &["glob", "grep", "job", "read", "symbol_searc
 /// and a background job's `output` returns at once, so this is a backstop.
 const CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3600);
 
+/// How long a fresh instance may take to answer the MCP handshake. A
+/// container answers in milliseconds; the first exec into a just-booted
+/// microVM (loading the guest over virtio-fs) can take far longer.
+const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
 /// A running environment. Dropping the last handle tears the instance down.
 pub struct Environment {
     pub spec: EnvSpec,
@@ -74,7 +79,13 @@ impl Environment {
             .start(&spec, workspace)
             .await
             .with_context(|| format!("starting environment {}", spec.name))?;
-        let client = match McpClient::connect(&spec.name, &instance.guest_command()).await {
+        let client = match McpClient::connect_within(
+            &spec.name,
+            &instance.guest_command(),
+            HANDSHAKE_TIMEOUT,
+        )
+        .await
+        {
             Ok(c) => c.with_call_timeout(CALL_TIMEOUT),
             Err(e) => {
                 instance.stop();

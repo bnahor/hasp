@@ -38,6 +38,16 @@ pub struct McpClient {
 
 impl McpClient {
     pub async fn connect(name: &str, cfg: &McpServerConfig) -> Result<Self> {
+        Self::connect_within(name, cfg, REQUEST_TIMEOUT).await
+    }
+
+    /// `connect` with a longer handshake allowance, for servers that start
+    /// slowly — a guest agent in a freshly booted microVM, say.
+    pub async fn connect_within(
+        name: &str,
+        cfg: &McpServerConfig,
+        handshake: std::time::Duration,
+    ) -> Result<Self> {
         let mut command = tokio::process::Command::new(&cfg.command);
         if let Some(cwd) = &cfg.cwd {
             command.current_dir(cwd);
@@ -87,14 +97,14 @@ impl McpClient {
             _child: child,
         };
         client
-            .request("initialize", initialize_params())
+            .request_within("initialize", initialize_params(), handshake)
             .await
             .context("mcp initialize")?;
         client
             .notify("notifications/initialized", json!({}))
             .await?;
         let listed = client
-            .request("tools/list", json!({}))
+            .request_within("tools/list", json!({}), handshake)
             .await
             .context("mcp tools/list")?;
         client.tools = listed["tools"]
@@ -121,10 +131,6 @@ impl McpClient {
     pub fn with_call_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.call_timeout = timeout;
         self
-    }
-
-    async fn request(&self, method: &str, params: Value) -> Result<Value> {
-        self.request_within(method, params, REQUEST_TIMEOUT).await
     }
 
     async fn request_within(

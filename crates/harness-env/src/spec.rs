@@ -42,6 +42,11 @@ pub struct EnvSpec {
     pub image: String,
     /// e.g. `linux/amd64` for an image published for one architecture only.
     pub platform: Option<String>,
+    /// The OCI runtime the container runs under: the backend's default
+    /// (`runc`, a shared kernel) unless named — `runsc` (gVisor, a user-space
+    /// kernel) or a Kata Containers runtime (a microVM per container), as
+    /// registered with the Docker daemon.
+    pub runtime: Option<String>,
     /// CPU limit (fractional allowed).
     pub cpus: Option<f64>,
     /// Memory limit: a number with an optional k/m/g suffix, e.g. `512m`, `4G`.
@@ -87,6 +92,14 @@ impl EnvSpec {
                 self.name
             );
         }
+        if let Some(rt) = &self.runtime
+            && (rt.is_empty()
+                || !rt
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)))
+        {
+            bail!("environment {}: bad runtime name {rt:?}", self.name);
+        }
         for key in self.env.keys() {
             if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
                 bail!("environment {}: bad variable name {key:?}", self.name);
@@ -97,7 +110,10 @@ impl EnvSpec {
 
     /// One line for notes and listings.
     pub fn summary(&self) -> String {
-        let mut parts = vec![format!("{} ({})", self.image, self.backend)];
+        let mut parts = vec![match &self.runtime {
+            Some(rt) => format!("{} ({}, {rt})", self.image, self.backend),
+            None => format!("{} ({})", self.image, self.backend),
+        }];
         if let Some(c) = self.cpus {
             parts.push(format!("{c} cpu"));
         }
@@ -201,6 +217,9 @@ mod tests {
             s.summary(),
             "python:3.12 (docker), 2 cpu, 4G memory, no network"
         );
+        let g = EnvSpec::parse("g", "image = \"x\"\nruntime = \"runsc\"").unwrap();
+        assert_eq!(g.summary(), "x (docker, runsc)");
+        assert!(EnvSpec::parse("g", "image = \"x\"\nruntime = \"a b\"").is_err());
 
         for bad in [
             "image = \"\"",

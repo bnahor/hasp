@@ -97,7 +97,7 @@ fn check_reports_the_limits_the_kernel_enforces() {
     assert!(text.contains("cpus    100000 100000"), "1 cpu: {text}");
     assert!(text.contains("memory  268435456"), "256m: {text}");
     assert!(text.contains("pids    100"), "{text}");
-    assert!(text.contains("network none (loopback only)"), "{text}");
+    assert!(text.contains("network none (no route out)"), "{text}");
     assert!(text.contains("bash in the workspace → ok"), "{text}");
     assert_eq!(containers_for(ws.path()), 0, "check leaves nothing behind");
 }

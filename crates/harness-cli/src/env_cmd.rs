@@ -77,9 +77,8 @@ async fn check(ws: &Workspace, name: &str) -> Result<()> {
          echo \"cpus    $(cat /sys/fs/cgroup/cpu.max 2>/dev/null || echo ?) (quota period)\"; \
          echo \"memory  $(cat /sys/fs/cgroup/memory.max 2>/dev/null || echo ?)\"; \
          echo \"pids    $(cat /sys/fs/cgroup/pids.max 2>/dev/null || echo ?)\"; \
-         up=''; for i in /sys/class/net/*; do n=${i##*/}; [ \"$n\" = lo ] && continue; \
-         [ \"$(cat $i/operstate 2>/dev/null)\" = up ] && up=\"$up $n\"; done; \
-         echo \"network${up:- none (loopback only)}\"";
+         out=$(awk 'NR>1 && $2==\"00000000\" {printf \" default route via %s\", $1}' /proc/net/route 2>/dev/null); \
+         echo \"network${out:- none (no route out)}\"";
     let (_, out) = env.exec(probe).await?;
     for line in out.lines() {
         println!("  {line}");

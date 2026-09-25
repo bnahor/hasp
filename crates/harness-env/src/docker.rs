@@ -129,6 +129,9 @@ impl Backend for Docker {
         if let Some(p) = &spec.platform {
             args.extend(["--platform".into(), p.clone()]);
         }
+        if let Some(rt) = &spec.runtime {
+            args.extend(["--runtime".into(), rt.clone()]);
+        }
         if let Some(c) = spec.cpus {
             args.extend(["--cpus".into(), c.to_string()]);
         }
