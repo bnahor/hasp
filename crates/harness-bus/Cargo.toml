@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 harness-core = { workspace = true }
+harness-env = { workspace = true }
 harness-tools = { workspace = true }
 harness-workspace = { workspace = true }
 async-trait = { workspace = true }

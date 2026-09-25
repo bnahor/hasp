@@ -36,6 +36,9 @@ pub struct LocalBus {
     fanout: Option<NoticeFanout>,
     children: Mutex<HashMap<String, Arc<Mutex<ChildEntry>>>>,
     counter: AtomicU64,
+    /// The parent's environment: children run their tools there unless they
+    /// name another one, so a sandboxed session cannot spawn its way out.
+    environment: Option<String>,
 }
 
 struct MuteSink;
@@ -97,6 +100,7 @@ impl LocalBus {
             parent_inbox,
             fanout,
             children: Mutex::new(HashMap::new()),
+            environment: None,
             counter: AtomicU64::new(0),
         }
     }
@@ -150,6 +154,14 @@ impl LocalBus {
     }
 }
 
+impl LocalBus {
+    /// Children inherit this environment unless they name another.
+    pub fn with_environment(mut self, name: Option<String>) -> Self {
+        self.environment = name;
+        self
+    }
+}
+
 #[async_trait::async_trait]
 impl Bus for LocalBus {
     async fn spawn_child(&self, req: SpawnRequest) -> Result<SpawnHandle, String> {
@@ -171,11 +183,26 @@ impl Bus for LocalBus {
         let session_id = session.header.id.clone();
         let root = ws.root().display().to_string();
         let provider = (self.provider_factory)()?;
+        // A child in an environment gets its own instance of it, with its own
+        // checkout (the worktree, for a mutation child) mounted inside.
+        let (tools, environment) = match req.environment.as_ref().or(self.environment.as_ref()) {
+            Some(env_name) => {
+                let env = harness_env::Environment::open(env_name, ws.root())
+                    .await
+                    .map_err(|e| format!("{e:#}"))?;
+                let label = format!("{env_name} ({})", env.id());
+                (
+                    harness_env::with_environment(builtins_base(), &env),
+                    Some(label),
+                )
+            }
+            None => (builtins_base(), None),
+        };
         let engine = Engine::new(
             ws,
             session,
             provider,
-            builtins_base(),
+            tools,
             (self.gate_factory)(),
             self.model.clone(),
             self.max_tokens,
@@ -192,6 +219,7 @@ impl Bus for LocalBus {
                 session_id: session_id.clone(),
                 mutation: req.mutation,
                 root: root.clone(),
+                environment: environment.clone(),
                 report: None,
             },
             engine: engine.clone(),
@@ -207,6 +235,7 @@ impl Bus for LocalBus {
             child_id: id,
             session_id,
             root,
+            environment,
         })
     }
 

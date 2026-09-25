@@ -823,6 +823,21 @@ impl Handler {
         let model = default_model_for(&provider_name());
         let mut tools = harness_tools::builtins_for(ws.root());
         tools.extend(harness_mcp::tools_for(&ws).await);
+        // `--env`: this session's tools run in a named environment. It is
+        // the resident's for its lifetime; a later client attaching joins it.
+        let env_name = params["environment"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(String::from);
+        if let Some(name) = &env_name {
+            match harness_env::Environment::open(name, ws.root()).await {
+                Ok(env) => tools = harness_env::with_environment(tools, &env),
+                Err(e) => {
+                    self.fail_open(id, &key, format!("{e:#}")).await;
+                    return;
+                }
+            }
+        }
         // The resident's output slot: turn updates and approval questions reach
         // whichever client is attached, or nobody when the session is detached.
         let client = SharedClient::default();
@@ -860,15 +875,18 @@ impl Handler {
         let fanout: harness_bus::NoticeFanout = Arc::new(move |note: &str| {
             fanout_client.update("note", note);
         });
-        let bus = Arc::new(harness_bus::LocalBus::new(
-            ws.clone(),
-            model.clone(),
-            harness_provider::max_output_for(&model),
-            factory,
-            gate_factory,
-            engine.notice_inbox(),
-            Some(fanout),
-        ));
+        let bus = Arc::new(
+            harness_bus::LocalBus::new(
+                ws.clone(),
+                model.clone(),
+                harness_provider::max_output_for(&model),
+                factory,
+                gate_factory,
+                engine.notice_inbox(),
+                Some(fanout),
+            )
+            .with_environment(env_name),
+        );
         engine.set_bus(bus.clone());
         if repaired_tool_calls > 0 {
             let _ = self.out_tx.send(harness_wire::encode(&harness_wire::session_update(
@@ -996,6 +1014,7 @@ impl Handler {
             task: task.to_string(),
             name: params["name"].as_str().map(String::from),
             mutation: params["mutation"].as_bool().unwrap_or(false),
+            environment: params["environment"].as_str().map(String::from),
         };
         match st.bus.spawn_child(req).await {
             Ok(h) => self.reply(
@@ -1004,6 +1023,7 @@ impl Handler {
                     "childId": h.child_id,
                     "sessionId": h.session_id,
                     "root": h.root,
+                    "environment": h.environment,
                 })),
             ),
             Err(e) => self.reply(id, Err(RpcError::internal(e))),
@@ -1044,6 +1064,7 @@ impl Handler {
                             "status": c.status.label(),
                             "sessionId": c.session_id,
                             "mutation": c.mutation,
+                            "environment": c.environment,
                             "root": c.root,
                             "report": c.report,
                         })

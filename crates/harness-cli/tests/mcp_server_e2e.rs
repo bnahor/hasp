@@ -122,3 +122,59 @@ async fn serves_the_tool_layer_with_the_same_confinement_and_policy() {
         "x"
     );
 }
+
+/// Calls run concurrently: a slow command does not hold up a read.
+#[tokio::test]
+async fn calls_run_concurrently() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("a.txt"), "alpha").unwrap();
+    let client = McpClient::connect("harness", &config(tmp.path(), &[("HARNESS_MCP_YOLO", "1")]))
+        .await
+        .unwrap();
+    let t = std::time::Instant::now();
+    let slow = client.call_tool("bash", serde_json::json!({"command": "sleep 2; echo slow"}));
+    let fast = async {
+        let r = client
+            .call_tool("read", serde_json::json!({"path": "a.txt"}))
+            .await
+            .unwrap();
+        (r, t.elapsed())
+    };
+    let (slow, (read, read_at)) = tokio::join!(slow, fast);
+    assert!(slow.unwrap().0.contains("slow"));
+    assert!(read.0.contains("alpha"));
+    assert!(
+        read_at < std::time::Duration::from_millis(1500),
+        "the read waited for the command: {read_at:?}"
+    );
+}
+
+/// An abandoned call (here: a client-side timeout) is cancelled on the server,
+/// and cancelling stops the command itself.
+#[tokio::test]
+async fn an_abandoned_call_stops_its_command() {
+    let tmp = tempfile::tempdir().unwrap();
+    let client = McpClient::connect("harness", &config(tmp.path(), &[("HARNESS_MCP_YOLO", "1")]))
+        .await
+        .unwrap()
+        .with_call_timeout(std::time::Duration::from_secs(1));
+    let err = client
+        .call_tool(
+            "bash",
+            serde_json::json!({"command": "sleep 3 && touch finished"}),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("timed out"), "{err}");
+    tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+    assert!(
+        !tmp.path().join("finished").exists(),
+        "the cancelled command ran to completion"
+    );
+    // The server is still healthy after the cancellation.
+    let ok = client
+        .call_tool("bash", serde_json::json!({"command": "echo still here"}))
+        .await
+        .unwrap();
+    assert!(ok.0.contains("still here"));
+}

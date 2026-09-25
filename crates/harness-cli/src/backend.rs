@@ -429,7 +429,7 @@ impl WireBackend {
         let open = harness_wire::encode(&Wire::request(
             2,
             open_method,
-            json!({"cwd": cwd.to_string_lossy()}),
+            json!({"cwd": cwd.to_string_lossy(), "environment": crate::session_environment()}),
         ));
         wr.write_all(open.as_bytes()).await?;
         wr.flush().await?;

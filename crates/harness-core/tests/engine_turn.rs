@@ -286,6 +286,7 @@ fn child(status: ChildStatus, report: &str) -> ChildInfo {
         session_id: "child-session".into(),
         mutation: false,
         root: "/w".into(),
+        environment: None,
         report: Some(report.to_string()),
     }
 }
@@ -295,6 +296,7 @@ impl Bus for MockBus {
     async fn spawn_child(&self, req: SpawnRequest) -> Result<SpawnHandle, String> {
         self.spawns.lock().unwrap().push(req);
         Ok(SpawnHandle {
+            environment: None,
             child_id: "sa-001-test".into(),
             session_id: "child-session".into(),
             root: "/w".into(),

@@ -15,6 +15,7 @@ mod acp;
 mod backend;
 mod creds;
 mod daemon;
+mod env_cmd;
 mod gate;
 mod highlight;
 mod markdown;
@@ -26,6 +27,18 @@ mod web;
 use gate::{GateCore, PlainGate, TuiGate};
 
 const DEFAULT_MODEL: &str = "claude-opus-5";
+
+/// `--env <name>`: run this session's tools in a named environment.
+static ENV_FLAG: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// The environment this session's tools run in: `--env`, else `HARNESS_ENV`.
+pub(crate) fn session_environment() -> Option<String> {
+    ENV_FLAG
+        .get()
+        .cloned()
+        .or_else(|| std::env::var("HARNESS_ENV").ok())
+        .filter(|s| !s.is_empty())
+}
 
 struct PrintSink;
 
@@ -70,11 +83,17 @@ async fn main() -> Result<()> {
             println!("harness {}", env!("CARGO_PKG_VERSION"));
             return Ok(());
         }
+        // An environment's main process: keeps its container alive without
+        // relying on anything (a `sleep`, a shell) being in the image.
+        Some("--guest-idle") => loop {
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+        },
         Some("login") => {
             let provider = argv.get(1).map(String::as_str).unwrap_or("anthropic");
             return creds::login_interactive(provider);
         }
         Some("doctor") => return doctor().await,
+        Some("env") => return env_cmd::run(&argv[1..]).await,
         Some("trust") => {
             let ws = Workspace::resolve(&std::env::current_dir()?)?;
             let root = ws.root();
@@ -289,8 +308,12 @@ async fn main() -> Result<()> {
             // embedded mode escape hatch (default is daemon-backed)
             "--no-daemon" => no_daemon = true,
             "--ascii" => ascii = true,
+            "--env" => {
+                let name = it.next().context("--env needs an environment name")?;
+                let _ = ENV_FLAG.set(name);
+            }
             other => bail!(
-                "unknown flag: {other} (expected -p, --model, --new, --yolo, --plain, --serve, --daemon, --provider, --no-daemon, --ascii, --mcp-serve)"
+                "unknown flag: {other} (expected -p, --model, --new, --yolo, --plain, --serve, --daemon, --provider, --no-daemon, --ascii, --env, --mcp-serve)"
             ),
         }
     }
@@ -597,6 +620,17 @@ async fn embedded_engine_with_bus(
     // the combined list name-sorted (cache contract).
     let mut tools = harness_tools::builtins_for(ws.root());
     tools.extend(harness_mcp::tools_for(&ws).await);
+    let env_name = session_environment();
+    if let Some(name) = &env_name {
+        eprintln!("▪ starting environment {name}…");
+        let env = harness_env::Environment::open(name, ws.root()).await?;
+        eprintln!(
+            "▪ environment {name}: {} ({})",
+            env.spec.summary(),
+            env.id()
+        );
+        tools = harness_env::with_environment(tools, &env);
+    }
     let mut engine = Engine::new(
         ws.clone(),
         session,
@@ -606,15 +640,18 @@ async fn embedded_engine_with_bus(
         model.clone(),
         harness_provider::max_output_for(&model),
     )?;
-    let bus = Arc::new(harness_bus::LocalBus::new(
-        ws,
-        model.clone(),
-        harness_provider::max_output_for(&model),
-        provider_factory.clone(),
-        child_gate_factory,
-        engine.notice_inbox(),
-        fanout,
-    ));
+    let bus = Arc::new(
+        harness_bus::LocalBus::new(
+            ws,
+            model.clone(),
+            harness_provider::max_output_for(&model),
+            provider_factory.clone(),
+            child_gate_factory,
+            engine.notice_inbox(),
+            fanout,
+        )
+        .with_environment(env_name),
+    );
     engine.set_bus(bus);
     Ok(engine)
 }
@@ -986,11 +1023,11 @@ fn checkout_root(exe: &std::path::Path) -> Option<std::path::PathBuf> {
 /// Reinstall from the checkout this binary was built from. Not a network
 /// updater — there is no release channel yet — so "update" means "rebuild
 /// what is on disk", which is exactly right for a checkout-based install.
-async fn self_update() -> Result<()> {
+/// The checkout this binary was built from, or the one a previous update
+/// recorded: an installed binary is not next to any checkout, but the first
+/// successful update remembers where one lives.
+pub(crate) fn find_checkout() -> Result<std::path::PathBuf> {
     let exe = std::env::current_exe()?;
-    // An installed binary is not next to any checkout, but the first
-    // successful update records where one lives, so later updates work from
-    // anywhere.
     let remembered = std::fs::read_to_string(harness_workspace::harness_home()?.join("checkout"))
         .ok()
         .filter(|p| {
@@ -998,11 +1035,16 @@ async fn self_update() -> Result<()> {
                 .join("crates/harness-cli/Cargo.toml")
                 .exists()
         });
-    let repo = checkout_root(&exe)
+    checkout_root(&exe)
         .or_else(|| remembered.map(|p| p.trim().to_string().into()))
         .with_context(|| {
             "no checkout found — run once from the repo, or: cargo install --path <repo>/crates/harness-cli".to_string()
-        })?;
+        })
+}
+
+async fn self_update() -> Result<()> {
+    let exe = std::env::current_exe()?;
+    let repo = find_checkout()?;
     println!(
         "harness {} — rebuilding from {}",
         env!("CARGO_PKG_VERSION"),
@@ -1273,6 +1315,37 @@ async fn doctor() -> Result<()> {
         for w in &hooks.warnings {
             println!("               {w}");
         }
+    }
+    if let Ok(ws) = Workspace::resolve(&std::env::current_dir()?) {
+        let envs = harness_env::spec::list(ws.root());
+        let names: Vec<String> = envs
+            .iter()
+            .map(|(n, r)| {
+                if r.is_ok() {
+                    n.clone()
+                } else {
+                    format!("{n} (INVALID)")
+                }
+            })
+            .collect();
+        let guests: Vec<String> = ["amd64", "arm64"]
+            .iter()
+            .filter(|a| harness_env::guest::binary_for(a).is_ok())
+            .map(|a| format!("linux/{a}"))
+            .collect();
+        println!(
+            "  environments: {} · guest agent: {}",
+            if names.is_empty() {
+                "none".into()
+            } else {
+                names.join(", ")
+            },
+            if guests.is_empty() {
+                "not built (harness env build-guest)".into()
+            } else {
+                guests.join(", ")
+            }
+        );
     }
     match harness_tools::sandbox::Mode::from_env() {
         Ok(m) => println!("  sandbox:     {} (HARNESS_SANDBOX)", m.label()),

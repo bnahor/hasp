@@ -431,6 +431,9 @@ pub struct SpawnRequest {
     pub task: String,
     pub name: Option<String>,
     pub mutation: bool,
+    /// Run the child's tools in this named environment. `None` inherits the
+    /// parent's (a session in an environment cannot spawn its way out of it).
+    pub environment: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -438,6 +441,8 @@ pub struct SpawnHandle {
     pub child_id: String,
     pub session_id: String,
     pub root: String,
+    /// `name (instance id)` when the child's tools run in an environment.
+    pub environment: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -465,6 +470,8 @@ pub struct ChildInfo {
     pub session_id: String,
     pub mutation: bool,
     pub root: String,
+    /// `name (instance id)` when the child's tools run in an environment.
+    pub environment: Option<String>,
     /// The child's final message, once it has one. Polling `agents` should be
     /// able to answer "what did it say?" without waiting for a notice.
     pub report: Option<String>,

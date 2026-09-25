@@ -91,6 +91,7 @@ async fn spawn_completes_message_triggers_worktree_isolates() {
             task: "say hi".into(),
             name: Some("greeter".into()),
             mutation: false,
+            environment: None,
         })
         .await
         .unwrap();
@@ -136,6 +137,7 @@ async fn spawn_completes_message_triggers_worktree_isolates() {
             task: "edit things".into(),
             name: None,
             mutation: true,
+            environment: None,
         })
         .await
         .unwrap();

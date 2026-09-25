@@ -37,14 +37,6 @@ fn yolo() -> bool {
     )
 }
 
-async fn write_message(out: &mut tokio::io::Stdout, msg: &Value) -> Result<()> {
-    let mut line = serde_json::to_string(msg)?;
-    line.push('\n');
-    out.write_all(line.as_bytes()).await?;
-    out.flush().await?;
-    Ok(())
-}
-
 pub async fn serve() -> Result<()> {
     let cwd = std::env::current_dir()?;
     let ws = Workspace::resolve(&cwd)?;
@@ -55,13 +47,16 @@ pub async fn serve() -> Result<()> {
     )?;
     // Not interactive: the gate's existing policy already means "allowlisted
     // read-only commands only, no writes" — exactly the right default here.
-    let mut gate: Box<dyn Gate> = Box::new(DenyGate(GateCore::new(yolo(), false)));
+    let ws = std::sync::Arc::new(ws);
+    let artifacts = std::sync::Arc::new(artifacts);
     // `todo` is a planning aid for this harness's own loop; to another agent
     // it would be a tool that does nothing.
-    let tools: Vec<Box<dyn Tool>> = harness_tools::builtins_base()
-        .into_iter()
-        .filter(|t| t.spec().name != "todo")
-        .collect();
+    let tools: std::sync::Arc<Vec<Box<dyn Tool>>> = std::sync::Arc::new(
+        harness_tools::builtins_base()
+            .into_iter()
+            .filter(|t| t.spec().name != "todo")
+            .collect(),
+    );
     let specs: Vec<Value> = tools
         .iter()
         .map(|t| {
@@ -85,8 +80,27 @@ pub async fn serve() -> Result<()> {
         }
     );
 
+    // Calls run concurrently — a client batches independent reads, and a
+    // long command must not hold up the rest — so replies go through one
+    // writer, and each in-flight call can be aborted by
+    // `notifications/cancelled` (dropping a tool's future stops its command,
+    // process group and all).
+    let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+    let writer = tokio::spawn(async move {
+        let mut out = tokio::io::stdout();
+        while let Some(msg) = out_rx.recv().await {
+            let mut line = serde_json::to_string(&msg).unwrap_or_default();
+            line.push('\n');
+            if out.write_all(line.as_bytes()).await.is_err() || out.flush().await.is_err() {
+                break;
+            }
+        }
+    });
+    let in_flight: std::sync::Arc<
+        std::sync::Mutex<std::collections::HashMap<String, tokio::task::AbortHandle>>,
+    > = Default::default();
+
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
-    let mut out = tokio::io::stdout();
     while let Some(line) = lines.next_line().await.context("reading stdin")? {
         if line.trim().is_empty() {
             continue;
@@ -97,44 +111,21 @@ pub async fn serve() -> Result<()> {
         let method = msg["method"].as_str().unwrap_or_default().to_string();
         let id = msg["id"].clone();
 
-        // Notifications carry no id and expect no reply.
+        // Notifications carry no id and expect no reply; cancellation is the
+        // one that does something.
         if id.is_null() {
+            if method == "notifications/cancelled"
+                && let Some(handle) = in_flight
+                    .lock()
+                    .expect("in-flight calls")
+                    .remove(&msg["params"]["requestId"].to_string())
+            {
+                handle.abort();
+            }
             continue;
         }
 
-        let reply = match method.as_str() {
-            "initialize" => Ok(json!({
-                "protocolVersion": PROTOCOL_VERSION,
-                "capabilities": {"tools": {}},
-                "serverInfo": {"name": "harness", "version": env!("CARGO_PKG_VERSION")},
-            })),
-            "ping" => Ok(json!({})),
-            "tools/list" => Ok(json!({"tools": specs})),
-            "tools/call" => {
-                let name = msg["params"]["name"].as_str().unwrap_or_default();
-                let args = msg["params"]["arguments"].clone();
-                let result = match tools.iter().find(|t| t.spec().name == name) {
-                    Some(tool) => {
-                        let mut ctx = ToolCtx {
-                            workspace: &ws,
-                            gate: gate.as_mut(),
-                            artifacts: &artifacts,
-                            bus: None,
-                        };
-                        tool.execute(args, &mut ctx).await
-                    }
-                    None => ToolOutput::error(format!("unknown tool: {name}")),
-                };
-                let mut content = vec![json!({"type": "text", "text": result.content})];
-                content.extend(result.images.iter().map(
-                    |img| json!({"type": "image", "data": img.data, "mimeType": img.media_type}),
-                ));
-                Ok(json!({"content": content, "isError": result.is_error}))
-            }
-            other => Err(format!("unknown method {other}")),
-        };
-
-        let message = match reply {
+        let reply = |result: Result<Value, String>| match result {
             Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
             Err(message) => json!({
                 "jsonrpc": "2.0",
@@ -142,7 +133,73 @@ pub async fn serve() -> Result<()> {
                 "error": {"code": -32601, "message": message},
             }),
         };
-        write_message(&mut out, &message).await?;
+        match method.as_str() {
+            "initialize" => {
+                let _ = out_tx.send(reply(Ok(json!({
+                    "protocolVersion": PROTOCOL_VERSION,
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "harness", "version": env!("CARGO_PKG_VERSION")},
+                }))));
+            }
+            "ping" => {
+                let _ = out_tx.send(reply(Ok(json!({}))));
+            }
+            "tools/list" => {
+                let _ = out_tx.send(reply(Ok(json!({"tools": specs}))));
+            }
+            "tools/call" => {
+                let name = msg["params"]["name"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
+                let args = msg["params"]["arguments"].clone();
+                let (tools, ws, artifacts) = (tools.clone(), ws.clone(), artifacts.clone());
+                let (out_tx, in_flight_done) = (out_tx.clone(), in_flight.clone());
+                let key = id.to_string();
+                let id2 = id.clone();
+                let task = tokio::spawn(async move {
+                    // Each call gets its own gate: with nobody to ask, the
+                    // policy alone decides, so there is no state to share.
+                    let mut gate = DenyGate(GateCore::new(yolo(), false));
+                    let result = match tools.iter().find(|t| t.spec().name == name) {
+                        Some(tool) => {
+                            let mut ctx = ToolCtx {
+                                workspace: &ws,
+                                gate: &mut gate,
+                                artifacts: &artifacts,
+                                bus: None,
+                            };
+                            tool.execute(args, &mut ctx).await
+                        }
+                        None => ToolOutput::error(format!("unknown tool: {name}")),
+                    };
+                    let mut content = vec![json!({"type": "text", "text": result.content})];
+                    content.extend(result.images.iter().map(
+                        |img| json!({"type": "image", "data": img.data, "mimeType": img.media_type}),
+                    ));
+                    let _ = out_tx.send(json!({
+                        "jsonrpc": "2.0",
+                        "id": id2,
+                        "result": {"content": content, "isError": result.is_error},
+                    }));
+                    in_flight_done.lock().expect("in-flight calls").remove(&key);
+                });
+                in_flight
+                    .lock()
+                    .expect("in-flight calls")
+                    .insert(id.to_string(), task.abort_handle());
+            }
+            other => {
+                let _ = out_tx.send(reply(Err(format!("unknown method {other}"))));
+            }
+        }
     }
+    // The client is gone: nobody will read these results, and a command left
+    // running would outlive the session that asked for it.
+    for (_, handle) in in_flight.lock().expect("in-flight calls").drain() {
+        handle.abort();
+    }
+    drop(out_tx);
+    let _ = writer.await;
     Ok(())
 }

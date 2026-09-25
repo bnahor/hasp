@@ -4,6 +4,7 @@ members = [
     "crates/harness-bus",
     "crates/harness-cli",
     "crates/harness-core",
+    "crates/harness-env",
     "crates/harness-mcp",
     "crates/harness-provider",
     "crates/harness-tools",
@@ -19,6 +20,7 @@ license = "MIT"
 [workspace.dependencies]
 harness-bus = { path = "crates/harness-bus" }
 harness-core = { path = "crates/harness-core" }
+harness-env = { path = "crates/harness-env" }
 harness-mcp = { path = "crates/harness-mcp" }
 harness-provider = { path = "crates/harness-provider" }
 harness-tools = { path = "crates/harness-tools" }

@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 harness-bus = { workspace = true }
 harness-core = { workspace = true }
+harness-env = { workspace = true }
 harness-mcp = { workspace = true }
 harness-provider = { workspace = true }
 harness-tools = { workspace = true }

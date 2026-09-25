@@ -28,7 +28,8 @@ impl Tool for SpawnTool {
                 "properties": {
                     "task": {"type": "string", "description": "Complete, self-contained task for the child"},
                     "name": {"type": "string", "description": "Short alias (optional)"},
-                    "mutation": {"type": "boolean", "description": "The child will edit files — it gets an isolated git worktree (default false: read-only in this checkout)"}
+                    "mutation": {"type": "boolean", "description": "The child will edit files — it gets an isolated git worktree (default false: read-only in this checkout)"},
+                    "environment": {"type": "string", "description": "Run the child's tools in this named environment (.harness/environments/<name>.toml): its own container with declared cpu, memory and network limits. Default: the parent's environment, if any"}
                 },
                 "required": ["task"]
             }),
@@ -46,11 +47,18 @@ impl Tool for SpawnTool {
             task: task.to_string(),
             name: args["name"].as_str().map(String::from),
             mutation: args["mutation"].as_bool().unwrap_or(false),
+            environment: args["environment"].as_str().map(String::from),
         };
         match bus.spawn_child(req).await {
             Ok(h) => ToolOutput::text(format!(
-                "spawned {} (alias from name, session {}, root {}) — watch for its [child …] notice",
-                h.child_id, h.session_id, h.root
+                "spawned {} (alias from name, session {}, root {}{}) — watch for its [child …] notice",
+                h.child_id,
+                h.session_id,
+                h.root,
+                h.environment
+                    .as_deref()
+                    .map(|e| format!(", tools in environment {e}"))
+                    .unwrap_or_default()
             )),
             Err(e) => ToolOutput::error(e),
         }
@@ -131,6 +139,10 @@ impl Tool for AgentsTool {
                     if c.mutation { "worktree" } else { "shared" },
                     c.session_id
                 );
+                let head = match &c.environment {
+                    Some(e) => format!("{head}  env {e}"),
+                    None => head,
+                };
                 match &c.report {
                     Some(r) => format!("{head}\n    report: {r}"),
                     None => head,
@@ -174,7 +186,8 @@ impl Tool for SubagentTool {
                 "properties": {
                     "task": {"type": "string", "description": "Complete, self-contained task"},
                     "name": {"type": "string", "description": "Short alias (optional)"},
-                    "mutation": {"type": "boolean", "description": "The child will edit files — it gets an isolated git worktree (default false)"}
+                    "mutation": {"type": "boolean", "description": "The child will edit files — it gets an isolated git worktree (default false)"},
+                    "environment": {"type": "string", "description": "Run the child's tools in this named environment (default: the parent's, if any)"}
                 },
                 "required": ["task"]
             }),
@@ -193,6 +206,7 @@ impl Tool for SubagentTool {
                 task: task.to_string(),
                 name: args["name"].as_str().map(str::to_string),
                 mutation: args["mutation"].as_bool().unwrap_or(false),
+                environment: args["environment"].as_str().map(str::to_string),
             })
             .await
         {

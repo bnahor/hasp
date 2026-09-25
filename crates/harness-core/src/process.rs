@@ -24,6 +24,28 @@ pub fn signal_group(pgid: u32, signal: i32) -> bool {
 #[cfg(unix)]
 pub use libc::{SIGKILL, SIGTERM};
 
+/// Whether process `pid` exists (it may belong to another user: EPERM means
+/// it exists but may not be signalled).
+#[cfg(unix)]
+pub fn alive(pid: u32) -> bool {
+    let Ok(pid) = i32::try_from(pid) else {
+        return false;
+    };
+    if pid <= 0 {
+        return false;
+    }
+    // SAFETY: signal 0 performs the permission and existence checks only.
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(not(unix))]
+pub fn alive(_pid: u32) -> bool {
+    true
+}
+
 #[cfg(not(unix))]
 pub fn signal_group(_pgid: u32, _signal: i32) -> bool {
     false
@@ -37,6 +59,16 @@ pub const SIGTERM: i32 = 15;
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn liveness() {
+        assert!(alive(std::process::id()));
+        assert!(!alive(0));
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        assert!(!alive(pid), "reaped child is gone");
+    }
 
     #[test]
     fn refuses_the_groups_that_mean_everyone() {

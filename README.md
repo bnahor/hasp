@@ -122,6 +122,49 @@ Project beats home, `.harness` beats `.claude`:
 
 `harness doctor` lists what it found.
 
+## Environments
+
+Run an agent's tools in their own container, with limits you declare:
+
+```toml
+# .harness/environments/py312.toml   (or ~/.harness/environments/)
+image   = "python:3.12-slim"
+cpus    = 2
+memory  = "4G"
+pids    = 512
+network = "none"                 # or "full" (default)
+setup   = ["pip install -e ."]   # once, as root, before the agent starts
+[env]
+PYTHONDONTWRITEBYTECODE = "1"
+```
+
+```sh
+harness env build-guest          # once: the static Linux guest agent (≈30 s, via Docker)
+harness env check py312          # start it, print the limits the kernel enforces, stop it
+harness --env py312              # this session's tools run inside it (also HARNESS_ENV)
+harness env list | prune         # definitions · remove containers whose session died
+```
+
+`read`, `write`, `edit`, `bash`, `job`, `grep`, `glob` and `symbol_search`
+run **inside** the environment. The session journal, the model connection,
+approvals and the agent bus stay on the host. The workspace is mounted at its own path,
+so edits are visible on the host immediately, and a git worktree works inside
+too.
+
+Child agents can each get one. `spawn` takes `environment: "py312"`, and a
+child otherwise inherits its parent's environment, so a session running in an
+environment can't spawn its way out of it. A mutation child gets its own
+container with its own worktree mounted.
+
+How it works: the guest agent is this harness's own static build, run inside
+as `harness --mcp-serve`. The host's tools become proxies with the same
+names and schemas, so the model sees no difference. A proxy asks the host's
+approval gate before forwarding a call; the guest then enforces the usual
+structural rules. Calls run concurrently, and esc cancels a command inside the
+environment too. Backends sit behind one trait
+(`crates/harness-env/src/backend.rs`); Docker is the first, and microVMs
+(Firecracker, Apple Virtualization) are designed to be the next.
+
 ## Sandbox
 
 `HARNESS_SANDBOX=workspace-write` runs every `bash` command under the OS
@@ -266,7 +309,7 @@ cheaper.
 
 ## Tests and CI
 
-`cargo test --workspace` (178 tests) plus `cargo fmt --all --check` and
+`cargo test --workspace` (195 tests) plus `cargo fmt --all --check` and
 `cargo clippy --workspace --all-targets -- -D warnings`, which
 `.github/workflows/ci.yml` runs on macOS and Linux. Tagging `vX.Y.Z` builds
 binaries for both macOS architectures and Linux via `release.yml`, and
