@@ -20,6 +20,7 @@ mod gate;
 mod highlight;
 mod markdown;
 mod mcp_server;
+mod review_cmd;
 mod theme;
 mod tui;
 mod web;
@@ -94,6 +95,7 @@ async fn main() -> Result<()> {
         }
         Some("doctor") => return doctor().await,
         Some("env") => return env_cmd::run(&argv[1..]).await,
+        Some("review") => return review_cmd::run(&argv[1..]).await,
         Some("trust") => {
             let ws = Workspace::resolve(&std::env::current_dir()?)?;
             let root = ws.root();

@@ -171,6 +171,49 @@ environment too. Backends sit behind one trait
 (`crates/harness-env/src/backend.rs`); Docker is the first, and microVMs
 (Firecracker, Apple Virtualization) are designed to be the next.
 
+## Review
+
+Review what an agent did the way you review a colleague's change — in your
+editor, over rounds — without leaving the terminal.
+
+```sh
+harness review new "add retries"    # snapshot the workspace, open the diff in $EDITOR
+harness review send                 # hand your comments to the agent (continues its session)
+harness review edit                 # next round: only what changed since your last look
+harness review approve --land       # commit exactly the snapshot you approved
+harness review                      # list: needs review · changes requested · approved · landed
+```
+
+In the TUI, `/review` does the same for the session's workspace or worktree;
+if you request changes, your comments land in the prompt and enter sends them.
+
+The document is a diff with line numbers. Comment on any line by adding a
+line below it that starts with `>> `; earlier comments show up as
+`<< #n open` next to the code they were about — they follow that code as the
+agent edits the file — and changing `open` to `resolved` closes them. Set
+`verdict: approve | changes` at the top.
+
+- **Only new work each round.** Every look commits the target with a private
+  index (your staging area and branches never move); the next look diffs from
+  the snapshot you last reviewed.
+- **Only reviewed work lands.** `land` refuses if the target changed after the
+  approval; a workspace lands as a commit of the approved tree, a child
+  worktree (`--worktree NAME`, or `/review` inside it) as a merge of the
+  approved snapshot, including work the agent never committed.
+- **State** is an append-only log per review in `.harness/reviews/`;
+  snapshots are kept alive by refs under `refs/harness/reviews/`.
+
+### Diffs
+
+Diffs everywhere (the review document, `write`/`edit` tool results) come from
+`harness-diff`: interned lines, histogram diff for readable hunks, and git's
+indent heuristic. Histogram's cost grows with file length × number of separate
+changes, so it runs only within a budget (~50 ms of work); past it the diff is
+Myers, which stays near-linear. A 200,000-line file with 20,000 scattered
+edits diffs in milliseconds instead of four seconds; nothing is ever
+"too large to diff". Profile with
+`cargo run --release -p harness-diff --example profile`.
+
 ## Sandbox
 
 `HARNESS_SANDBOX=workspace-write` runs every `bash` command under the OS

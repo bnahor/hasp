@@ -54,7 +54,7 @@ fn edit_text_with(editor: &str, initial: &str) -> Option<String> {
 }
 
 /// `$VISUAL`, then `$EDITOR`, then `vi` — the usual precedence.
-fn edit_text(initial: &str) -> Option<String> {
+pub(crate) fn edit_text(initial: &str) -> Option<String> {
     let editor = std::env::var("VISUAL")
         .or_else(|_| std::env::var("EDITOR"))
         .unwrap_or_else(|_| "vi".to_string());
@@ -93,6 +93,10 @@ const COMMANDS: &[(&str, &str)] = &[
     ("model", "list models, or switch: /model <id>"),
     ("name", "name this session: /name <text>"),
     ("new", "start a fresh session"),
+    (
+        "review",
+        "review this session's changes in $EDITOR (only what's new since your last look): [--all] [new]",
+    ),
     (
         "resume",
         "list sessions for this workspace, or open one: /resume <n>",
@@ -286,6 +290,8 @@ struct App {
     completion_idx: usize,
     /// Set by ctrl+g; `run` owns the terminal, so it performs the handoff.
     request_editor: bool,
+    /// Set by `/review [args]`: also an editor handoff that `run` performs.
+    request_review: Option<String>,
     /// Workspace files for `@` completion, fetched once on first use.
     files: Vec<String>,
     files_loaded: bool,
@@ -312,6 +318,7 @@ impl App {
             thinking: String::new(),
             cursor: 0,
             request_editor: false,
+            request_review: None,
             files: Vec::new(),
             files_loaded: false,
             completion_idx: 0,
@@ -1146,6 +1153,10 @@ impl App {
                     );
                 }
             }
+            "review" => {
+                self.refresh_footer();
+                self.request_review = Some(rest.to_string());
+            }
             "worktree" => {
                 let r = self.call("session/worktree", json!({"name": rest}));
                 if !r.is_null() {
@@ -1757,6 +1768,30 @@ pub fn run(
                     app.cursor = app.input.len();
                     app.push("editor exited without saving", LineKind::Note);
                 }
+            }
+        }
+        if let Some(args) = app.request_review.take() {
+            let root = app.footer.root.clone();
+            let _ = disable_raw_mode();
+            let _ = execute!(std::io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
+            let result = crate::review_cmd::tui_review(std::path::Path::new(&root), &args);
+            let _ = execute!(std::io::stdout(), EnterAlternateScreen, EnableMouseCapture);
+            let _ = enable_raw_mode();
+            terminal.clear()?;
+            match result {
+                Ok(r) => {
+                    app.push(format!("▪ {}", r.summary), LineKind::Meta);
+                    // The comments become the next prompt: enter sends them.
+                    if let Some(feedback) = r.feedback {
+                        app.input = feedback;
+                        app.cursor = app.input.len();
+                        app.push(
+                            "review comments are in the prompt — enter sends them to the agent",
+                            LineKind::Note,
+                        );
+                    }
+                }
+                Err(e) => app.push(format!("✗ review: {e:#}"), LineKind::Error),
             }
         }
         if app.wants_files() && !app.files_loaded {

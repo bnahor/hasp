@@ -14,6 +14,7 @@ harness-core = { workspace = true }
 harness-env = { workspace = true }
 harness-mcp = { workspace = true }
 harness-provider = { workspace = true }
+harness-review = { workspace = true }
 harness-tools = { workspace = true }
 harness-wire = { workspace = true }
 harness-workspace = { workspace = true }
