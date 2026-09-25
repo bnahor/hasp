@@ -15,6 +15,9 @@ pub struct Credentials {
     pub zai_api_key: Option<String>,
     #[serde(default)]
     pub deepseek_api_key: Option<String>,
+    /// Keys for every other provider (coding plans, custom endpoints), by id.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub keys: std::collections::BTreeMap<String, String>,
 }
 
 fn home() -> std::io::Result<PathBuf> {
@@ -47,7 +50,10 @@ pub fn save_at(dir: &Path, provider: &str, key: &str) -> std::io::Result<PathBuf
     match provider {
         "zai" => creds.zai_api_key = Some(key.to_string()),
         "deepseek" => creds.deepseek_api_key = Some(key.to_string()),
-        _ => creds.anthropic_api_key = Some(key.to_string()),
+        "anthropic" => creds.anthropic_api_key = Some(key.to_string()),
+        other => {
+            creds.keys.insert(other.to_string(), key.to_string());
+        }
     }
     let target = dir.join(file_name());
     let mut f = std::fs::File::create(&target)?;
@@ -91,16 +97,36 @@ pub fn resolve_key(provider: &str) -> Option<String> {
             }),
         // Local by construction; the key header is a placeholder.
         "ollama" => Some("ollama".into()),
-        _ => resolve_api_key(),
+        "anthropic" => resolve_api_key(),
+        other => match harness_provider::plans::find(other) {
+            Some(plan) => std::env::var(&plan.key_env)
+                .ok()
+                .filter(|k| !k.is_empty())
+                .or_else(|| load().keys.get(other).cloned()),
+            None => resolve_api_key(),
+        },
     }
 }
 
 /// Interactive login; also used as the first-run fallback when no key is found.
 pub fn login_interactive(provider: &str) -> Result<()> {
+    let plan = harness_provider::plans::find(provider);
     let label = match provider {
-        "zai" => "z.ai",
-        "deepseek" => "DeepSeek",
-        _ => "Anthropic",
+        "zai" => "z.ai".to_string(),
+        "deepseek" => "DeepSeek".to_string(),
+        "anthropic" => "Anthropic".to_string(),
+        other => match &plan {
+            Some(p) => {
+                if !p.signup.is_empty() {
+                    println!("get a key at {}", p.signup);
+                }
+                p.label.clone()
+            }
+            None => anyhow::bail!(
+                "unknown provider {other} — `harness providers` lists them, and \
+                 ~/.harness/providers.json adds your own"
+            ),
+        },
     };
     let key = rpassword::prompt_password(format!("{label} API key (input hidden): "))?;
     let key = key.trim();

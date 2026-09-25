@@ -433,7 +433,7 @@ fn provider_factory() -> harness_bus::ProviderFactory {
     let default_model = harness_provider::default_model(&provider);
     let key = crate::creds::resolve_key(&provider);
     Arc::new(move || {
-        let model = std::env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| default_model.into());
+        let model = std::env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| default_model.clone());
         match harness_provider::build(&provider, key.clone().unwrap_or_default(), model) {
             Some(client) => Ok(client),
             None => Err(format!("unknown provider “{provider}”")),

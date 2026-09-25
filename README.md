@@ -171,6 +171,57 @@ environment too. Backends sit behind one trait
 (`crates/harness-env/src/backend.rs`); Docker is the first, and microVMs
 (Firecracker, Apple Virtualization) are designed to be the next.
 
+## Bring your own plan
+
+Two ways to run on a plan you already pay for.
+
+**Coding plans and other endpoints, on the harness's own engine.** Most
+coding plans ship an Anthropic-compatible endpoint; the harness speaks that
+wire, so a plan is just a key:
+
+```sh
+harness providers                  # built-ins, which have keys, default models
+harness login kimi                 # stored in ~/.harness/credentials.json (0600)
+harness --provider kimi            # or KIMI_API_KEY in the environment
+```
+
+Built in: `zai` (GLM coding plan), `kimi` (Kimi Code), `minimax` /
+`minimax-cn`, `qwen` (Alibaba Model Studio coding plan — Qwen, GLM, Kimi,
+MiniMax), `moonshot`, `deepseek`. Anything else Anthropic-compatible (a
+company gateway, OpenRouter, a new plan) goes in `~/.harness/providers.json`:
+
+```json
+{ "providers": { "gateway": { "base_url": "https://llm.example.com/anthropic",
+  "key_env": "GATEWAY_KEY", "model": "glm-5.1", "auth": "bearer" } } }
+```
+
+**Subscriptions, through their own CLI.** A Claude Pro/Max or ChatGPT plan
+can only be used by its vendor's own client, so the harness drives that
+client — the one you already installed and logged into — and puts its own
+layer on top: the TUI, approvals in the prompt line, `/review` and
+`harness review`, worktrees.
+
+```sh
+harness agents                         # which agents are installed
+harness --agent claude                 # Claude Code, on your Claude plan
+harness --agent codex --model gpt-5.5  # Codex, on your ChatGPT plan
+harness --agent opencode -p "fix the failing test"
+```
+
+| agent | protocol | plan |
+|---|---|---|
+| `claude` | `claude -p` stream-json; permissions asked over the same pipe | Claude Pro / Max |
+| `codex` | `codex app-server` (JSON-RPC) | ChatGPT Plus / Pro |
+| `gemini`, `opencode` | ACP (Agent Client Protocol) | Google account; OpenCode's providers |
+
+Any other ACP agent is one entry in `~/.harness/agents.json`
+(`{"agents": {"name": {"command": "…", "args": ["…"]}}}`). Each agent's
+session continues across runs in the same workspace (`--new` starts fresh);
+`--yolo` lifts its approval prompts, and its own sandbox still applies. The
+agent runs its own tools, so the harness's tool-level guarantees (path
+confinement, the bash rule) are the agent's to keep in this mode; reviews
+still see everything it changed.
+
 ## Review
 
 Review what an agent did the way you review a colleague's change — in your

@@ -27,6 +27,10 @@ pub struct Anthropic {
     /// the model-change journal record it, so it must not claim "anthropic"
     /// for a DeepSeek or z.ai endpoint.
     label: &'static str,
+    /// Send the key as `Authorization: Bearer` instead of `x-api-key`.
+    bearer: bool,
+    /// Image support, when the endpoint's table entry says so.
+    vision: Option<bool>,
     /// Retry cadence and mid-stream silence limit; injectable so tests need no
     /// environment mutation (which is unsafe in this edition).
     retry_base_ms: u64,
@@ -46,6 +50,8 @@ impl Anthropic {
             base_url: "https://api.anthropic.com".into(),
             window: CONTEXT_WINDOW,
             label: "anthropic",
+            bearer: false,
+            vision: None,
             retry_base_ms: crate::retry::default_base_ms(),
             stall: crate::retry::stall_timeout(),
             reasoning: false,
@@ -120,11 +126,28 @@ impl Anthropic {
     /// Whether `model` on this endpoint takes images: every Claude model does;
     /// DeepSeek's models are text-only; on z.ai only the `…v` vision models.
     fn vision_for(&self, model: &str) -> bool {
+        if let Some(v) = self.vision {
+            return v;
+        }
         match self.label {
             "deepseek" => false,
             "zai" => model.to_ascii_lowercase().ends_with('v'),
             _ => true,
         }
+    }
+
+    pub fn with_bearer(mut self, bearer: bool) -> Self {
+        self.bearer = bearer;
+        self
+    }
+
+    pub fn with_vision(mut self, vision: bool) -> Self {
+        self.vision = Some(vision);
+        self
+    }
+
+    pub fn base_url(&self) -> &str {
+        &self.base_url
     }
 
     /// Name the service behind an Anthropic-compatible endpoint.
@@ -452,10 +475,13 @@ impl Provider for Anthropic {
         // Retried only here, before anything has reached the sink: a turn that
         // already streamed text cannot be un-streamed.
         let resp = crate::retry::send_retrying(self.retry_base_ms, || {
-            self.client
-                .post(format!("{}/v1/messages", self.base_url))
-                .header("x-api-key", &self.api_key)
-                .header("anthropic-version", ANTHROPIC_VERSION)
+            let req = self.client.post(format!("{}/v1/messages", self.base_url));
+            let req = if self.bearer {
+                req.bearer_auth(&self.api_key)
+            } else {
+                req.header("x-api-key", &self.api_key)
+            };
+            req.header("anthropic-version", ANTHROPIC_VERSION)
                 .json(&body)
         })
         .await?;

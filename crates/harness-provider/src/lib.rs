@@ -7,6 +7,7 @@ pub mod deepseek;
 pub mod echo;
 pub mod mock;
 pub mod openai_compat;
+pub mod plans;
 pub mod retry;
 pub mod zai;
 
@@ -41,11 +42,14 @@ pub(crate) fn omitted(n: usize) -> String {
 
 /// Default model for a provider id (`--provider` / `HARNESS_PROVIDER`). One
 /// definition, so the client and the daemon can never disagree about it.
-pub fn default_model(provider: &str) -> &'static str {
+pub fn default_model(provider: &str) -> String {
     match provider {
-        "zai" => zai::DEFAULT_MODEL,
-        "deepseek" => deepseek::DEFAULT_MODEL,
-        _ => "claude-opus-5",
+        "zai" => zai::DEFAULT_MODEL.into(),
+        "deepseek" => deepseek::DEFAULT_MODEL.into(),
+        "anthropic" => "claude-opus-5".into(),
+        other => plans::find(other)
+            .map(|p| p.default_model)
+            .unwrap_or_else(|| "claude-opus-5".into()),
     }
 }
 
@@ -64,7 +68,7 @@ pub fn anthropic_compatible(
         }
         "zai" => Some(zai::client(api_key, model)),
         "deepseek" => Some(deepseek::client(api_key, model)),
-        _ => None,
+        other => plans::find(other).map(|p| plans::client(&p, api_key, model)),
     };
     client.map(|c| c.with_window(window))
 }

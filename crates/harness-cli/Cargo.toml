@@ -9,6 +9,7 @@ name = "harness"
 path = "src/main.rs"
 
 [dependencies]
+harness-agents = { workspace = true }
 harness-bus = { workspace = true }
 harness-core = { workspace = true }
 harness-env = { workspace = true }

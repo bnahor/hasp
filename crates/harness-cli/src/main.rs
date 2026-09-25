@@ -12,6 +12,7 @@ use std::sync::Arc;
 use tui::UiEvent;
 
 mod acp;
+mod agent_cmd;
 mod backend;
 mod creds;
 mod daemon;
@@ -94,6 +95,43 @@ async fn main() -> Result<()> {
             return creds::login_interactive(provider);
         }
         Some("doctor") => return doctor().await,
+        Some("agents") => {
+            agent_cmd::list();
+            return Ok(());
+        }
+        Some("providers") => {
+            println!(
+                "{:<12} {:<6} {:<22} endpoint",
+                "provider", "key", "default model"
+            );
+            let anthropic_key = creds::resolve_key("anthropic").is_some();
+            println!(
+                "{:<12} {:<6} {:<22} https://api.anthropic.com",
+                "anthropic",
+                if anthropic_key { "yes" } else { "-" },
+                harness_provider::default_model("anthropic")
+            );
+            for p in harness_provider::plans::all() {
+                println!(
+                    "{:<12} {:<6} {:<22} {}   ({})",
+                    p.id,
+                    if creds::resolve_key(&p.id).is_some() {
+                        "yes"
+                    } else {
+                        "-"
+                    },
+                    p.default_model,
+                    p.base_url,
+                    p.label
+                );
+            }
+            println!(
+                "\nuse: harness login <provider>, then harness --provider <provider> [--model <id>]\n\
+                 add your own: ~/.harness/providers.json\n\
+                 subscriptions (Claude, ChatGPT, Gemini, …) through their own CLI: harness agents"
+            );
+            return Ok(());
+        }
         Some("env") => return env_cmd::run(&argv[1..]).await,
         Some("review") => return review_cmd::run(&argv[1..]).await,
         Some("trust") => {
@@ -290,6 +328,7 @@ async fn main() -> Result<()> {
     let mut no_daemon = false;
     let mut ascii = std::env::var("HARNESS_ASCII").is_ok();
     let mut provider_flag: Option<String> = None;
+    let mut agent_flag: Option<String> = None;
     let mut model_flag_given = false;
     let mut it = argv.into_iter();
     while let Some(a) = it.next() {
@@ -307,6 +346,7 @@ async fn main() -> Result<()> {
             "--acp" => acp_serve = true,
             "--daemon" => use_daemon = true,
             "--provider" => provider_flag = Some(it.next().context("--provider needs a value")?),
+            "--agent" => agent_flag = Some(it.next().context("--agent needs a name")?),
             // embedded mode escape hatch (default is daemon-backed)
             "--no-daemon" => no_daemon = true,
             "--ascii" => ascii = true,
@@ -315,7 +355,7 @@ async fn main() -> Result<()> {
                 let _ = ENV_FLAG.set(name);
             }
             other => bail!(
-                "unknown flag: {other} (expected -p, --model, --new, --yolo, --plain, --serve, --daemon, --provider, --no-daemon, --ascii, --env, --mcp-serve)"
+                "unknown flag: {other} (expected -p, --model, --new, --yolo, --plain, --serve, --daemon, --provider, --agent, --no-daemon, --ascii, --env, --mcp-serve)"
             ),
         }
     }
@@ -332,6 +372,23 @@ async fn main() -> Result<()> {
     }
 
     let cwd = std::env::current_dir()?;
+    let agent_name = agent_flag.or_else(|| {
+        std::env::var("HARNESS_AGENT")
+            .ok()
+            .filter(|a| !a.is_empty())
+    });
+    if let Some(name) = agent_name {
+        return run_agent(
+            &name,
+            &cwd,
+            prompt,
+            model_flag_given.then_some(model),
+            new_session,
+            yolo,
+            ascii,
+        )
+        .await;
+    }
     if let (Some(p), true) = (&prompt, use_daemon) {
         let sock = daemon::socket_path()?;
         let mut client = harness_wire::WireClient::connect(&sock)
@@ -572,6 +629,62 @@ async fn main() -> Result<()> {
     let mut terminal = ratatui::init();
     let res = tokio::task::block_in_place(|| {
         tui::run(&mut terminal, backend, catalog, prompt_rx, event_rx, ascii)
+    });
+    ratatui::restore();
+    res
+}
+
+/// `--agent NAME`: an external agent on the user's own plan, in the TUI or
+/// one-shot with `-p`. It continues the agent's last session in this
+/// workspace unless `--new`.
+async fn run_agent(
+    name: &str,
+    cwd: &std::path::Path,
+    prompt: Option<String>,
+    model: Option<String>,
+    new_session: bool,
+    yolo: bool,
+    ascii: bool,
+) -> Result<()> {
+    let spec = agent_cmd::spec(name)?;
+    let ws = Workspace::resolve(cwd)?;
+    let root = ws.root().to_path_buf();
+    let resume = (!new_session)
+        .then(|| agent_cmd::last_session(&root, name))
+        .flatten();
+    if let Some(p) = prompt {
+        let opts = harness_agents::Opts {
+            cwd: root.clone(),
+            model,
+            yolo,
+            resume,
+            ask: agent_cmd::terminal_asker(),
+        };
+        return agent_cmd::one_shot(&spec, &root, opts, &p).await;
+    }
+    let (event_tx, event_rx) = std::sync::mpsc::channel();
+    let (prompt_tx, prompt_rx) = std::sync::mpsc::channel();
+    let opts = harness_agents::Opts {
+        cwd: root.clone(),
+        model,
+        yolo,
+        resume,
+        ask: agent_cmd::tui_asker(prompt_tx),
+    };
+    eprintln!("▪ starting {name} in {}", root.display());
+    let backend =
+        agent_cmd::AgentBackend::start(spec, opts, root, ws.identity().branch.clone(), event_tx)
+            .await?;
+    let mut terminal = ratatui::init();
+    let res = tokio::task::block_in_place(|| {
+        tui::run(
+            &mut terminal,
+            Box::new(backend),
+            Vec::new(),
+            prompt_rx,
+            event_rx,
+            ascii,
+        )
     });
     ratatui::restore();
     res
