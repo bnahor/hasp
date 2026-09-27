@@ -107,7 +107,11 @@ impl Anthropic {
     /// to a model that does not take it is a 400.
     fn reasoning_for(&self, model: &str) -> (Option<Value>, Option<String>) {
         if !self.reasoning {
-            return (None, None);
+            // Other endpoints: only an effort their table entry asked for (or
+            // the user did, with HARNESS_EFFORT). Kimi K3 defaults to its
+            // maximum when none is sent — about twice the output tokens of
+            // `high` — so leaving it out is not neutral.
+            return (None, self.effort_pref.clone());
         }
         let caps = ClaudeCaps::of(model);
         let thinking_off = std::env::var("HARNESS_THINKING").is_ok_and(|v| v == "off");
@@ -138,6 +142,13 @@ impl Anthropic {
 
     pub fn with_bearer(mut self, bearer: bool) -> Self {
         self.bearer = bearer;
+        self
+    }
+
+    /// Effort sent as `output_config.effort` on endpoints without Claude's
+    /// reasoning controls.
+    pub fn with_effort(mut self, effort: Option<String>) -> Self {
+        self.effort_pref = effort;
         self
     }
 

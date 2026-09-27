@@ -246,7 +246,15 @@ impl Workspace {
     pub fn confine(&self, rel: &str) -> Result<PathBuf, WorkspaceError> {
         let rel_path = Path::new(rel);
         if rel_path.is_absolute() {
-            return Err(WorkspaceError::Absolute(rel.to_string()));
+            // Name the relative form when the path is inside the root, so the
+            // model's retry is one call, not a guess.
+            let hint = rel_path
+                .strip_prefix(&self.identity.root)
+                .ok()
+                .filter(|r| !r.as_os_str().is_empty())
+                .map(|r| format!(" (inside the project: use `{}`)", r.display()))
+                .unwrap_or_default();
+            return Err(WorkspaceError::Absolute(format!("{rel}{hint}")));
         }
         if rel_path
             .components()
@@ -372,6 +380,20 @@ mod tests {
         let ws = Workspace::resolve(tmp.path()).unwrap();
         assert!(ws.identity().branch.is_some());
         assert!(ws.identity().head.is_some());
+    }
+
+    #[test]
+    fn an_absolute_path_inside_the_root_is_refused_with_its_relative_form() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = Workspace::resolve(tmp.path()).unwrap();
+        let inside = ws.root().join("app/regex.txt");
+        let err = ws
+            .confine(&inside.to_string_lossy())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("use `app/regex.txt`"), "{err}");
+        let outside = ws.confine("/etc/passwd").unwrap_err().to_string();
+        assert!(!outside.contains("use `"), "{outside}");
     }
 
     #[test]

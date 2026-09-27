@@ -17,6 +17,7 @@ egress proxy replaces with the real key on the way out.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shlex
@@ -35,6 +36,8 @@ PROVIDERS = {
 HOST_CA = Path("/etc/ssl/certs/ca-certificates.crt")
 REMOTE_CA = "/tmp/harness-ca-bundle.crt"
 REMOTE_BIN = "/usr/local/bin/harness"
+OUT, ERR, DONE = "/tmp/harness.out", "/tmp/harness.err", "/tmp/harness.exit"
+POLL_SECONDS = 10
 
 
 def route(model_name: str | None) -> tuple[str, str, str, str]:
@@ -106,6 +109,21 @@ class HarnessAgentMixin:
             await environment.upload_file(HOST_CA, REMOTE_CA)
             await environment.exec(command=f"chmod 644 {REMOTE_CA}", user="root")
 
+    async def _collect(self, environment, context, logs: Path) -> None:
+        """Copy the newest session journal out and record its usage."""
+        found = await environment.exec(
+            command='ls -t "$HOME"/.harness/sessions/*/*.jsonl 2>/dev/null | head -1'
+        )
+        journal = (found.stdout or "").strip()
+        if not journal:
+            return
+        target = logs / "harness-session.jsonl"
+        await environment.download_file(journal, target)
+        u = usage_from_session(target.read_text())
+        context.n_input_tokens = u["input_total"]
+        context.n_cache_tokens = u["cache_read"]
+        context.n_output_tokens = u["output"]
+
     async def run(self, instruction: str, environment, context) -> None:
         provider, model, key_var, _ = route(self.model_name)
         env = {key_var: os.environ.get(key_var, "")}
@@ -113,27 +131,32 @@ class HarnessAgentMixin:
             env["SSL_CERT_FILE"] = REMOTE_CA
         logs = Path(self.logs_dir)
         logs.mkdir(parents=True, exist_ok=True)
+        # Detached, so usage can be collected while it runs: a runner timeout
+        # cancels this coroutine, and whatever was collected by then stays.
         command = (
             f"{REMOTE_BIN} --provider {provider} --model {shlex.quote(model)} "
             f"--no-daemon --new --yolo -p {shlex.quote(instruction)}"
         )
-        result = await environment.exec(command=command, env=self._env(environment, env))
-        (logs / "harness.stdout").write_text(result.stdout or "")
-        (logs / "harness.stderr").write_text(result.stderr or "")
-
-        # The journal of the session this run created: the newest one.
-        found = await environment.exec(
-            command='ls -t "$HOME"/.harness/sessions/*/*.jsonl 2>/dev/null | head -1'
+        await environment.exec(
+            command=(
+                f"rm -f {DONE}; (nohup sh -c {shlex.quote(command)} >{OUT} 2>{ERR}; "
+                f"echo $? >{DONE}) >/dev/null 2>&1 &"
+            ),
+            env=self._env(environment, env),
         )
-        journal = (found.stdout or "").strip()
-        if journal:
-            target = logs / "harness-session.jsonl"
-            await environment.download_file(journal, target)
-            u = usage_from_session(target.read_text())
-            context.n_input_tokens = u["input_total"]
-            context.n_cache_tokens = u["cache_read"]
-            context.n_output_tokens = u["output"]
-        if result.return_code != 0:
-            raise RuntimeError(
-                f"harness exited {result.return_code}: {(result.stderr or '')[-2000:]}"
-            )
+        code = None
+        while code is None:
+            await asyncio.sleep(POLL_SECONDS)
+            done = await environment.exec(command=f"cat {DONE} 2>/dev/null")
+            if (done.stdout or "").strip():
+                code = int(done.stdout.strip())
+            await self._collect(environment, context, logs)
+        for remote, local in ((OUT, "harness.stdout"), (ERR, "harness.stderr")):
+            try:
+                await environment.download_file(remote, logs / local)
+            except Exception:
+                pass
+        if code != 0:
+            err = (logs / "harness.stderr")
+            tail = err.read_text()[-2000:] if err.exists() else ""
+            raise RuntimeError(f"harness exited {code}: {tail}")

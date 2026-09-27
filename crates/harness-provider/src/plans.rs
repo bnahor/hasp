@@ -47,6 +47,10 @@ pub struct Plan {
     /// Where to get a key, for `harness login` and `harness providers`.
     #[serde(default)]
     pub signup: String,
+    /// Reasoning effort sent as `output_config.effort` (overridden by
+    /// HARNESS_EFFORT); `None` sends nothing and gets the endpoint's default.
+    #[serde(default)]
+    pub effort: Option<String>,
 }
 
 fn yes() -> bool {
@@ -73,7 +77,15 @@ fn plan(
         auth,
         vision,
         signup: signup.into(),
+        effort: None,
     }
+}
+
+/// Kimi K3 reasons at `max` unless told otherwise; `high` is what Codex
+/// sends it, and measured at about half the output tokens.
+fn kimi(mut p: Plan) -> Plan {
+    p.effort = Some("high".into());
+    p
 }
 
 /// The built-in endpoints. `zai` and `deepseek` also have dedicated modules
@@ -92,7 +104,7 @@ pub fn builtin() -> Vec<Plan> {
             false,
             "https://platform.deepseek.com/api_keys",
         ),
-        plan(
+        kimi(plan(
             "kimi",
             "Kimi Code (coding plan)",
             "https://api.kimi.ai/coding",
@@ -101,7 +113,7 @@ pub fn builtin() -> Vec<Plan> {
             XApiKey,
             true,
             "https://www.kimi.com/code",
-        ),
+        )),
         plan(
             "minimax",
             "MiniMax (coding / token plan)",
@@ -122,7 +134,7 @@ pub fn builtin() -> Vec<Plan> {
             false,
             "https://platform.minimaxi.com",
         ),
-        plan(
+        kimi(plan(
             "moonshot",
             "Moonshot (Kimi, pay as you go)",
             "https://api.moonshot.ai/anthropic",
@@ -131,7 +143,7 @@ pub fn builtin() -> Vec<Plan> {
             Bearer,
             true,
             "https://platform.kimi.ai",
-        ),
+        )),
         plan(
             "qwen",
             "Alibaba Model Studio coding plan (Qwen, GLM, Kimi, MiniMax)",
@@ -217,6 +229,12 @@ pub fn client(p: &Plan, api_key: String, model: String) -> crate::anthropic::Ant
         .with_name(label)
         .with_bearer(p.auth == Auth::Bearer)
         .with_vision(p.vision)
+        .with_effort(
+            std::env::var("HARNESS_EFFORT")
+                .ok()
+                .filter(|e| !e.is_empty())
+                .or_else(|| p.effort.clone()),
+        )
 }
 
 #[cfg(test)]
@@ -231,6 +249,16 @@ mod tests {
         ids.dedup();
         assert_eq!(ids.len(), all.len());
         assert!(all.iter().all(|p| p.base_url.starts_with("https://")));
+    }
+
+    #[test]
+    fn kimi_endpoints_ask_for_high_effort_not_the_max_default() {
+        for id in ["kimi", "moonshot"] {
+            let p = builtin().into_iter().find(|p| p.id == id).unwrap();
+            assert_eq!(p.effort.as_deref(), Some("high"), "{id}");
+        }
+        let glm = builtin().into_iter().find(|p| p.id == "zai").unwrap();
+        assert_eq!(glm.effort, None);
     }
 
     #[test]
