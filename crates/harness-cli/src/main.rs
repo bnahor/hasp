@@ -148,6 +148,7 @@ async fn main() -> Result<()> {
             return Ok(());
         }
         Some("sessions") => return sessions_cmd(&argv[1..]).await,
+        Some("app") => return web::app().await,
         Some("web") => {
             let port: u16 = match argv.get(1) {
                 Some(p) => p.parse().context("port must be a number")?,

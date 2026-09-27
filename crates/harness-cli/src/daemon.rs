@@ -639,6 +639,10 @@ impl Handler {
             | harness_wire::METHOD_SESSION_LOAD => {
                 if !self.initialized {
                     self.reply(id, Err(RpcError::internal("initialize first")));
+                } else if self.state.is_some() && method != harness_wire::METHOD_SESSION_CONTINUE {
+                    // On an open connection, new/load swap the resident's
+                    // session in place (the TUI's /new and /resume).
+                    self.swap_session(id, method, params).await;
                 } else if self.state.is_some() {
                     self.reply(
                         id,
@@ -1248,6 +1252,47 @@ impl Handler {
             };
             let _ = out.send(harness_wire::encode(&msg));
         });
+    }
+
+    /// Replace the resident's session with a fresh one (`session/new`) or a
+    /// saved one of the same workspace (`session/load {path}`). Refused while
+    /// a turn runs, like every restructuring request.
+    async fn swap_session(&mut self, id: u64, method: &str, params: serde_json::Value) {
+        let outcome: Result<serde_json::Value, String> = async {
+            let resident = self.state.clone().ok_or("no session")?;
+            let Ok(_turn) = resident.turn.clone().try_lock_owned() else {
+                return Err(TURN_BUSY.into());
+            };
+            let mut eng = resident.engine.lock().await;
+            let session = if method == harness_wire::METHOD_SESSION_NEW {
+                SessionManager::create(&eng.workspace).map_err(|e| e.to_string())?
+            } else {
+                let path = params["path"].as_str().ok_or("path required")?;
+                let s =
+                    SessionManager::open(std::path::Path::new(path)).map_err(|e| e.to_string())?;
+                // Another project's session would run with this project's tools.
+                if s.header.workspace.root != eng.workspace.root() {
+                    return Err(format!(
+                        "{path} belongs to {}, not {}",
+                        s.header.workspace.root.display(),
+                        eng.workspace.root().display()
+                    ));
+                }
+                s
+            };
+            let sid = session.header.id.clone();
+            let reply = serde_json::json!({
+                "sessionId": sid,
+                "path": session.path.as_ref().map(|p| p.display().to_string()).unwrap_or_default(),
+            });
+            eng.session = session;
+            drop(eng);
+            *resident.session_id.lock().expect("session id") = sid.clone();
+            resident.client.set_session_id(&sid);
+            Ok(reply)
+        }
+        .await;
+        self.reply(id, outcome.map_err(RpcError::internal));
     }
 
     async fn sync_call(&mut self, id: u64, method: &str, params: serde_json::Value) {

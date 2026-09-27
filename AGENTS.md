@@ -8,6 +8,7 @@ A personal agent harness. Research and architecture live in `research/`; the act
 - `cargo run -p harness-cli` — TUI (needs a key: env `ANTHROPIC_API_KEY`, `harness login`, or first-run prompt)
 - `cargo run -p harness-cli -- --plain` — line-REPL fallback
 - `cargo run -p harness-cli -- -p "do something" --yolo` — one-shot
+- `harness app` — the desktop app (sidebar, conversation, changes pane) over the daemon
 - `harness review [new|edit|send|approve --land]` — review agent work in $EDITOR
 - `harness providers` · `harness --provider kimi` — coding plans on our engine
 - `harness agents` · `harness --agent claude|codex|gemini|opencode` — drive a vendor CLI on the user's own plan

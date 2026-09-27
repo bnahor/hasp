@@ -23,7 +23,8 @@ harness --plain                # line REPL, embedded (no daemon)
 harness -p "explain src/lib.rs"  # one-shot, prints the answer
 harness --provider mock        # keyless: echoes prompts, for poking at the UI
 
-harness web                    # browser UI on 127.0.0.1 (prints a token URL)
+harness app                    # the desktop app, in its own window
+harness web                    # the same app on 127.0.0.1 (prints a token URL)
 harness --acp                  # Agent Client Protocol on stdio — editors (Zed, …) drive it
 harness --mcp-serve            # serve the same tools over MCP on stdio
 ```
@@ -305,11 +306,24 @@ Two more front ends speak to the same daemon, so neither reimplements anything:
   and gate questions arrive as `session/request_permission` — an editor's refusal
   is what the tool sees. Client-provided `fs/*` and `terminal/*` capabilities are
   unused; the harness's own confined tools do that work.
-- **`harness web [port]`** — a localhost HTTP server serving one self-contained
-  page (no build step, no dependencies) that streams `session/update` over SSE and
-  sends commands to `/rpc`. One session per server, bound to the directory it was
-  started in, token-guarded so another tab cannot drive it. Approvals have nobody
-  to ask, so they are denied exactly as a detached daemon denies them.
+- **`harness app`** / **`harness web [port]`** — the desktop app. `app` opens it
+  in its own window (a Chromium-family browser's app mode, else the default
+  browser); `web` serves it and prints the URL.
+  - **Sidebar:** every project and session on the machine, newest first, with a
+    live dot that pulses while a turn runs; search; new session (⌘N); open any
+    folder as a project.
+  - **Conversation:** streamed markdown with code blocks, folded reasoning, tool
+    cards with coloured diffs, a live chip while a tool runs, turn stats, and
+    approvals as cards (allow once / always / deny) instead of silent denials.
+  - **Composer:** Enter to send, Esc to stop, image paste and drop, a model
+    picker, and the context meter in the header.
+  - **Changes pane (⌘J):** the working tree against HEAD through the review
+    engine's diff; click a line number to comment, and the comments go to the
+    agent with your next message.
+  - Light and dark themes; no build step or dependencies (one embedded page).
+    One daemon connection per open project, token-guarded so another tab cannot
+    drive a session. Projects under the system temp directory are left out of
+    the sidebar unless opened directly.
 
 ## MCP servers
 

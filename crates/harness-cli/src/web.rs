@@ -1,40 +1,65 @@
-//! A browser front end for the daemon (`harness web [port]`).
+//! The desktop app's server (`harness app`, `harness web [port]`).
 //!
-//! Deliberately thin: the daemon already owns the session, so this is one more
-//! client of it — a small localhost HTTP server that serves one embedded page,
-//! forwards its commands over the wire protocol, and streams the daemon's
-//! `session/update` notifications back as SSE. Nothing is reimplemented; the
-//! browser gets exactly what a TUI gets.
+//! Still just another client of the daemon: one daemon connection per open
+//! project (the daemon keeps one resident session per workspace), each with
+//! its own event stream, plus a few read-only views the daemon has no reason
+//! to serve — the session list across every project (read from the session
+//! journals), a finished transcript, and the working tree's changes (through
+//! `harness-review` and `harness-diff`). Approvals, which the old page could
+//! only deny, are asked in the page and answered back.
 //!
 //! Localhost only, and every route requires the token printed at startup, so a
-//! stray page in another tab cannot drive the session (CSRF on a local port is
-//! a real thing).
+//! stray page in another tab cannot drive a session.
 
-use anyhow::{Context, Result};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use anyhow::{Context, Result, bail};
+use harness_core::session::SessionManager;
+use harness_core::{AgentMessage, ContentBlock};
 use harness_wire::Wire;
 use serde_json::{Value, json};
-use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::OwnedWriteHalf;
 use tokio::net::{TcpListener, TcpStream, UnixStream};
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
 
-const PAGE: &str = include_str!("../assets/web.html");
+const PAGE: &str = include_str!("../assets/app.html");
 
-/// A command for the session actor; the reply travels back on the oneshot.
-struct Cmd {
-    method: String,
-    params: Value,
-    reply: oneshot::Sender<Result<Value, String>>,
+/// Lines of one file's diff sent to the page; the rest is summarized.
+const DIFF_LINES_PER_FILE: usize = 4000;
+
+/// Something for a project's connection to do.
+enum Cmd {
+    Call {
+        method: String,
+        params: Value,
+        reply: oneshot::Sender<Result<Value, String>>,
+    },
+    /// Answer a daemon permission request by its request id.
+    Answer { id: u64, answer: String },
 }
 
-/// Owns the daemon connection: requests out, notifications broadcast to
-/// whoever is watching `/events`.
-async fn session_actor(
-    cwd: std::path::PathBuf,
-    mut cmd_rx: mpsc::UnboundedReceiver<Cmd>,
+/// One open project: its daemon connection and its event stream.
+struct Project {
+    cmd: mpsc::UnboundedSender<Cmd>,
     events: broadcast::Sender<Value>,
-) -> Result<()> {
+    /// Permission questions not answered yet, re-sent to a page that
+    /// (re)connects so an approval is never lost to a reload.
+    asks: Arc<std::sync::Mutex<HashMap<u64, String>>>,
+}
+
+type Projects = Arc<Mutex<HashMap<PathBuf, Arc<Project>>>>;
+
+async fn send(wr: &mut OwnedWriteHalf, msg: &Wire) -> Result<()> {
+    wr.write_all(harness_wire::encode(msg).as_bytes()).await?;
+    wr.flush().await?;
+    Ok(())
+}
+
+/// Connect, initialize and open (or join) the project's resident session.
+async fn open_project(root: &Path) -> Result<Arc<Project>> {
     let sock = crate::daemon::socket_path()?;
     crate::daemon::ensure_daemon(&sock, &[]).await?;
     let stream = UnixStream::connect(&sock)
@@ -43,29 +68,17 @@ async fn session_actor(
     let (rd, mut wr) = stream.into_split();
     let mut lines = BufReader::new(rd).lines();
     let mut next_id = 0u64;
-    let mut pending: std::collections::HashMap<u64, oneshot::Sender<Result<Value, String>>> =
-        std::collections::HashMap::new();
-
-    async fn send(wr: &mut OwnedWriteHalf, msg: &Wire) -> Result<()> {
-        wr.write_all(harness_wire::encode(msg).as_bytes()).await?;
-        wr.flush().await?;
-        Ok(())
-    }
-
-    // Handshake first: initialize and open this directory's session. Nothing
-    // else can happen until both are answered, so their replies are read
-    // inline rather than through the pending map.
     for (method, params) in [
-        (harness_wire::METHOD_INITIALIZE, json!({"client": "web"})),
+        (harness_wire::METHOD_INITIALIZE, json!({"client": "app"})),
         (
             harness_wire::METHOD_SESSION_CONTINUE,
-            json!({"cwd": cwd.to_string_lossy()}),
+            json!({"cwd": root.to_string_lossy()}),
         ),
     ] {
         next_id += 1;
         let id = next_id;
         send(&mut wr, &Wire::request(id, method, params)).await?;
-        let answered = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let answered = tokio::time::timeout(std::time::Duration::from_secs(60), async {
             while let Ok(Some(line)) = lines.next_line().await {
                 if let Some(Wire::Response {
                     id: rid,
@@ -75,7 +88,6 @@ async fn session_actor(
                     && rid == id
                 {
                     return match (result, error) {
-                        (Some(_), _) => Ok(()),
                         (None, Some(e)) => Err(e.message),
                         _ => Ok(()),
                     };
@@ -86,96 +98,463 @@ async fn session_actor(
         .await;
         match answered {
             Ok(Ok(())) => {}
-            Ok(Err(e)) => anyhow::bail!("daemon refused {method}: {e}"),
-            Err(_) => anyhow::bail!("daemon did not answer {method}"),
+            Ok(Err(e)) => bail!("daemon refused {method}: {e}"),
+            Err(_) => bail!("daemon did not answer {method}"),
         }
     }
 
-    loop {
-        tokio::select! {
-            cmd = cmd_rx.recv() => {
-                let Some(cmd) = cmd else { return Ok(()) };
-                next_id += 1;
-                let id = next_id;
-                if send(&mut wr, &Wire::request(id, &cmd.method, cmd.params)).await.is_err() {
-                    let _ = cmd.reply.send(Err("daemon connection lost".into()));
-                    return Ok(());
-                }
-                pending.insert(id, cmd.reply);
-            }
-            line = lines.next_line() => {
-                let Some(line) = line? else { return Ok(()) };
-                match harness_wire::decode(&line) {
-                    Some(Wire::Response { id, result, error }) => {
-                        if let Some(tx) = pending.remove(&id) {
-                            let _ = tx.send(match (result, error) {
-                                (Some(r), _) => Ok(r),
-                                (None, Some(e)) => Err(e.message),
-                                _ => Ok(Value::Null),
-                            });
+    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<Cmd>();
+    let (events, _) = broadcast::channel::<Value>(1024);
+    let asks: Arc<std::sync::Mutex<HashMap<u64, String>>> = Default::default();
+    let project = Arc::new(Project {
+        cmd: cmd_tx,
+        events: events.clone(),
+        asks: asks.clone(),
+    });
+    tokio::spawn(async move {
+        let mut pending: HashMap<u64, oneshot::Sender<Result<Value, String>>> = HashMap::new();
+        loop {
+            tokio::select! {
+                cmd = cmd_rx.recv() => match cmd {
+                    None => return,
+                    Some(Cmd::Call { method, params, reply }) => {
+                        next_id += 1;
+                        if send(&mut wr, &Wire::request(next_id, &method, params)).await.is_err() {
+                            let _ = reply.send(Err("daemon connection lost".into()));
+                            return;
                         }
+                        pending.insert(next_id, reply);
                     }
-                    Some(Wire::Notification { method, params }) => {
-                        let _ = events.send(json!({"method": method, "params": params}));
-                    }
-                    // A localhost page has no way to answer approvals; deny,
-                    // exactly like a detached daemon does.
-                    Some(Wire::Request { id, .. }) => {
+                    Some(Cmd::Answer { id, answer }) => {
+                        asks.lock().expect("asks").remove(&id);
                         let _ = send(&mut wr, &Wire::Response {
                             id,
-                            result: Some(json!({"answer": "n"})),
+                            result: Some(json!({"answer": answer})),
                             error: None,
                         }).await;
+                        let _ = events.send(json!({"method": "permission/answered", "params": {"id": id}}));
                     }
-                    None => {}
+                },
+                line = lines.next_line() => {
+                    let Ok(Some(line)) = line else {
+                        let _ = events.send(json!({"method": "app/disconnected", "params": {}}));
+                        return;
+                    };
+                    match harness_wire::decode(&line) {
+                        Some(Wire::Response { id, result, error }) => {
+                            if let Some(tx) = pending.remove(&id) {
+                                let _ = tx.send(match (result, error) {
+                                    (Some(r), _) => Ok(r),
+                                    (None, Some(e)) => Err(e.message),
+                                    _ => Ok(Value::Null),
+                                });
+                            }
+                        }
+                        Some(Wire::Notification { method, params }) => {
+                            let _ = events.send(json!({"method": method, "params": params}));
+                        }
+                        Some(Wire::Request { id, method, params }) => {
+                            let question = params["question"].as_str().unwrap_or("allow?").to_string();
+                            asks.lock().expect("asks").insert(id, question.clone());
+                            let _ = events.send(json!({
+                                "method": method,
+                                "params": {"id": id, "question": question},
+                            }));
+                        }
+                        None => {}
+                    }
                 }
             }
         }
+    });
+    Ok(project)
+}
+
+async fn project(projects: &Projects, root: &str) -> Result<Arc<Project>> {
+    if root.is_empty() {
+        bail!("root required");
+    }
+    // Resolve to the workspace root so two paths into one repo share one entry.
+    let ws = harness_workspace::Workspace::resolve(Path::new(root))?;
+    let key = ws.root().to_path_buf();
+    let mut map = projects.lock().await;
+    if let Some(p) = map.get(&key)
+        && !p.cmd.is_closed()
+    {
+        return Ok(p.clone());
+    }
+    let p = open_project(&key).await?;
+    map.insert(key, p.clone());
+    Ok(p)
+}
+
+async fn call(p: &Project, method: &str, params: Value) -> Result<Value, String> {
+    let (tx, rx) = oneshot::channel();
+    p.cmd
+        .send(Cmd::Call {
+            method: method.to_string(),
+            params,
+            reply: tx,
+        })
+        .map_err(|_| "project connection is gone".to_string())?;
+    // A turn can run for hours (goals, autonomous mode); everything else is quick.
+    let limit = if method == harness_wire::METHOD_SESSION_PROMPT {
+        24 * 3600
+    } else {
+        600
+    };
+    match tokio::time::timeout(std::time::Duration::from_secs(limit), rx).await {
+        Ok(Ok(r)) => r,
+        Ok(Err(_)) => Err("project connection ended".into()),
+        Err(_) => Err("timed out".into()),
     }
 }
 
-fn token() -> String {
-    // Localhost CSRF guard, not a secret worth a CSPRNG.
-    format!(
-        "{:x}{:x}",
-        std::process::id(),
-        harness_core::session::now_ms()
-    )
+// ---- read-only views ----
+
+/// Every saved session, newest first, grouped by project root.
+fn list_projects(keep: &str) -> Result<Value> {
+    let root = harness_workspace::sessions_root()?;
+    let mut sessions: Vec<(i64, Value, String)> = Vec::new();
+    for dir in std::fs::read_dir(&root).into_iter().flatten().flatten() {
+        for f in std::fs::read_dir(dir.path())
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let path = f.path();
+            if path.extension().is_none_or(|e| e != "jsonl") {
+                continue;
+            }
+            let modified = f
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            if let Some((summary, ws_root)) = summarize(&path, modified) {
+                sessions.push((modified, summary, ws_root));
+            }
+        }
+    }
+    sessions.sort_by_key(|s| std::cmp::Reverse(s.0));
+    let mut order: Vec<String> = Vec::new();
+    let mut groups: HashMap<String, Vec<Value>> = HashMap::new();
+    for (_, s, ws_root) in sessions {
+        if !groups.contains_key(&ws_root) {
+            order.push(ws_root.clone());
+        }
+        let g = groups.entry(ws_root).or_default();
+        if g.len() < 50 {
+            g.push(s);
+        }
+    }
+    let projects: Vec<Value> = order
+        .into_iter()
+        .filter(|r| Path::new(r).is_dir() && (r == keep || !is_scratch(Path::new(r))))
+        .map(|r| {
+            let name = Path::new(&r)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| r.clone());
+            let sessions = groups.remove(&r).unwrap_or_default();
+            json!({"root": r, "name": name, "sessions": sessions})
+        })
+        .collect();
+    Ok(json!({"projects": projects}))
 }
 
-async fn read_request(
-    stream: &mut TcpStream,
-) -> Result<(String, String, Option<usize>, String, Vec<u8>)> {
+/// Throwaway directories (tests, one-off experiments) under the system temp
+/// dir: real projects do not live there, and they would bury the ones that do.
+fn is_scratch(root: &Path) -> bool {
+    let tmp = std::env::temp_dir();
+    let tmp = tmp.canonicalize().unwrap_or(tmp);
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    root.starts_with(&tmp)
+        || [
+            "/tmp",
+            "/private/tmp",
+            "/var/folders",
+            "/private/var/folders",
+        ]
+        .iter()
+        .any(|t| root.starts_with(t))
+}
+
+/// A session's sidebar row, without parsing the whole journal: the header,
+/// its latest name, and the first thing the user asked as a fallback title.
+fn summarize(path: &Path, modified: i64) -> Option<(Value, String)> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut lines = text.lines();
+    let header: Value = serde_json::from_str(lines.next()?).ok()?;
+    let ws_root = header["workspace"]["root"].as_str()?.to_string();
+    let mut name: Option<String> = None;
+    let mut title: Option<String> = None;
+    let mut messages = 0usize;
+    for line in lines {
+        if line.contains("\"type\":\"session_info\"") {
+            if let Ok(v) = serde_json::from_str::<Value>(line) {
+                name = v["name"].as_str().map(String::from);
+            }
+        } else if line.contains("\"type\":\"message\"") {
+            messages += 1;
+            if title.is_none()
+                && line.contains("\"role\":\"user\"")
+                && let Ok(v) = serde_json::from_str::<Value>(line)
+            {
+                title = v["message"]["content"]
+                    .as_str()
+                    .map(|t| t.lines().next().unwrap_or("").chars().take(80).collect());
+            }
+        }
+    }
+    if messages == 0 {
+        return None;
+    }
+    let title = name.or(title).unwrap_or_else(|| "Untitled".into());
+    Some((
+        json!({
+            "id": header["id"],
+            "path": path.display().to_string(),
+            "title": title,
+            "branch": header["workspace"]["branch"],
+            "modified": modified,
+            "messages": messages,
+        }),
+        ws_root,
+    ))
+}
+
+/// A saved session's conversation, structured for the transcript view.
+fn transcript(path: &Path) -> Result<Value> {
+    let s = SessionManager::open(path)?;
+    let mut items = Vec::new();
+    let mut calls: HashMap<String, (String, Value)> = HashMap::new();
+    for m in s.context_messages() {
+        match m {
+            AgentMessage::User {
+                content, images, ..
+            } => items.push(json!({"kind": "user", "text": content, "images": images.len()})),
+            AgentMessage::Assistant { content, .. } => {
+                for b in content {
+                    match b {
+                        ContentBlock::Text { text } if !text.trim().is_empty() => {
+                            items.push(json!({"kind": "assistant", "text": text}))
+                        }
+                        ContentBlock::Thinking { thinking, .. } if !thinking.trim().is_empty() => {
+                            items.push(json!({"kind": "thinking", "text": thinking}))
+                        }
+                        ContentBlock::ToolCall {
+                            id,
+                            name,
+                            arguments,
+                        } => {
+                            calls.insert(id, (name, arguments));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            AgentMessage::ToolResult {
+                tool_call_id,
+                tool_name,
+                content,
+                is_error,
+                ..
+            } => {
+                let args = calls
+                    .remove(&tool_call_id)
+                    .map(|(_, a)| a)
+                    .unwrap_or(Value::Null);
+                items.push(json!({
+                    "kind": "tool",
+                    "name": tool_name,
+                    "subject": subject_of(&args),
+                    "output": clip(&content, 20_000),
+                    "isError": is_error,
+                }));
+            }
+        }
+    }
+    Ok(json!({"id": s.header.id, "items": items}))
+}
+
+fn subject_of(args: &Value) -> String {
+    for k in ["command", "path", "pattern", "url", "query"] {
+        if let Some(s) = args[k].as_str() {
+            return s.to_string();
+        }
+    }
+    match args {
+        Value::Null => String::new(),
+        other => clip(&other.to_string(), 200),
+    }
+}
+
+fn clip(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}\n… ({} more bytes)", &s[..end], s.len() - end)
+}
+
+/// The working tree against HEAD, as the review engine diffs it.
+fn changes(root: &Path) -> Result<Value> {
+    use harness_review::{diff, git};
+    let head = match git::head(root) {
+        Ok(h) => h,
+        Err(_) => return Ok(json!({"files": [], "note": "not a git repository with a commit"})),
+    };
+    let snap = git::snapshot(root, "harness app: working tree")?;
+    let files = diff::between(root, &head, &snap)?;
+    let out: Vec<Value> = files
+        .iter()
+        .map(|f| {
+            let mut shown = 0usize;
+            let hunks: Vec<Value> = f
+                .hunks
+                .iter()
+                .map_while(|h| {
+                    if shown >= DIFF_LINES_PER_FILE {
+                        return None;
+                    }
+                    let lines: Vec<Value> = h
+                        .lines
+                        .iter()
+                        .take(DIFF_LINES_PER_FILE - shown)
+                        .map(|l| {
+                            let kind = match l.kind {
+                                diff::Kind::Add => "add",
+                                diff::Kind::Del => "del",
+                                diff::Kind::Context => "ctx",
+                            };
+                            json!([kind, l.old, l.new, l.text])
+                        })
+                        .collect();
+                    shown += lines.len();
+                    Some(json!({"header": h.header(), "lines": lines}))
+                })
+                .collect();
+            json!({
+                "path": f.path,
+                "note": f.note,
+                "added": f.stats.added,
+                "removed": f.stats.removed,
+                "hunks": hunks,
+                "truncated": shown >= DIFF_LINES_PER_FILE,
+            })
+        })
+        .collect();
+    Ok(json!({"files": out}))
+}
+
+fn models() -> Value {
+    let list: Vec<Value> = harness_provider::catalog::load()
+        .into_iter()
+        .map(|m| json!({"id": m.id, "window": m.context_window}))
+        .collect();
+    json!({"models": list})
+}
+
+// ---- HTTP ----
+
+fn token() -> String {
+    // Localhost CSRF guard: unguessable enough for a page in another tab.
+    let mut bytes = [0u8; 16];
+    if std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut bytes))
+        .is_err()
+    {
+        let seed = harness_core::session::now_ms() as u64 ^ (std::process::id() as u64) << 32;
+        bytes[..8].copy_from_slice(&seed.to_le_bytes());
+    }
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+struct Request {
+    method: String,
+    path: String,
+    query: HashMap<String, String>,
+    token: Option<String>,
+    body: Vec<u8>,
+}
+
+fn url_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => out.push(b' '),
+            b'%' if i + 2 < bytes.len() => {
+                if let Ok(b) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                    out.push(b);
+                    i += 2;
+                } else {
+                    out.push(b'%');
+                }
+            }
+            b => out.push(b),
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+async fn read_request(stream: &mut TcpStream) -> Result<Request> {
     let mut buf = Vec::with_capacity(4096);
     let mut byte = [0u8; 1];
     // Headers end at CRLFCRLF; read a byte at a time so no body is swallowed.
     while !buf.ends_with(b"\r\n\r\n") {
         if buf.len() > 64 * 1024 {
-            anyhow::bail!("request head too large");
+            bail!("request head too large");
         }
-        let n = stream.read(&mut byte).await?;
-        if n == 0 {
-            anyhow::bail!("connection closed");
+        if stream.read(&mut byte).await? == 0 {
+            bail!("connection closed");
         }
         buf.push(byte[0]);
     }
     let head = String::from_utf8_lossy(&buf).to_string();
     let mut lines = head.lines();
-    let request_line = lines.next().unwrap_or_default().to_string();
-    let mut parts = request_line.split_whitespace();
+    let mut parts = lines.next().unwrap_or_default().split_whitespace();
     let method = parts.next().unwrap_or_default().to_string();
     let target = parts.next().unwrap_or_default().to_string();
-    let mut content_length = None;
+    let mut content_length = 0usize;
+    let mut token = None;
     for line in lines {
-        if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-            content_length = v.trim().parse().ok();
+        let lower = line.to_ascii_lowercase();
+        if let Some(v) = lower.strip_prefix("content-length:") {
+            content_length = v.trim().parse().unwrap_or(0);
+        } else if lower.starts_with("x-harness-token:") {
+            token = line.split_once(':').map(|(_, v)| v.trim().to_string());
         }
     }
-    let mut body = vec![0u8; content_length.unwrap_or(0)];
+    // Images come through here; 64 MiB is several screenshots.
+    if content_length > 64 * 1024 * 1024 {
+        bail!("request body too large");
+    }
+    let mut body = vec![0u8; content_length];
     if !body.is_empty() {
         stream.read_exact(&mut body).await?;
     }
-    Ok((method, target, content_length, head, body))
+    let (path, q) = target.split_once('?').unwrap_or((target.as_str(), ""));
+    let query = q
+        .split('&')
+        .filter_map(|kv| kv.split_once('='))
+        .map(|(k, v)| (k.to_string(), url_decode(v)))
+        .collect();
+    Ok(Request {
+        method,
+        path: path.to_string(),
+        query,
+        token,
+        body,
+    })
 }
 
 async fn respond(
@@ -186,7 +565,7 @@ async fn respond(
 ) -> Result<()> {
     let head = format!(
         "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\n\
-         cache-control: no-store\r\nconnection: close\r\n\r\n",
+         cache-control: no-store\r\nx-content-type-options: nosniff\r\nconnection: close\r\n\r\n",
         body.len()
     );
     stream.write_all(head.as_bytes()).await?;
@@ -195,45 +574,40 @@ async fn respond(
     Ok(())
 }
 
-/// `harness web [port]` — serve the browser client until killed.
-pub async fn serve(port: u16) -> Result<()> {
-    let cwd = std::env::current_dir()?;
-    let (events, _) = broadcast::channel::<Value>(256);
-    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Cmd>();
-    let actor_events = events.clone();
-    tokio::spawn(async move {
-        if let Err(e) = session_actor(cwd, cmd_rx, actor_events).await {
-            eprintln!("session ended: {e}");
-        }
-    });
+async fn json_reply(stream: &mut TcpStream, r: Result<Value, String>) -> Result<()> {
+    let body = match r {
+        Ok(v) => json!({"ok": true, "result": v}),
+        Err(e) => json!({"ok": false, "error": e}),
+    };
+    respond(stream, "200 OK", "application/json", &body.to_string()).await
+}
 
+/// Bind and serve until killed. Returns never; `on_ready` gets the URL.
+pub async fn serve_with(port: u16, on_ready: impl FnOnce(&str)) -> Result<()> {
     let listener = TcpListener::bind(("127.0.0.1", port))
         .await
         .with_context(|| format!("binding 127.0.0.1:{port}"))?;
     let bound = listener.local_addr()?.port();
-    let token = token();
-    // Written once, errors ignored: whoever reads the banner may close the
-    // pipe after the URL line (`harness web | head -1`, a test harness), and a
-    // `println!` into a closed pipe panics — which took the server down with it.
-    {
-        use std::io::Write;
-        let mut out = std::io::stdout().lock();
-        let _ = write!(
-            out,
-            "harness web → http://127.0.0.1:{bound}/?token={token}\n  \
-             localhost only · token required · one session (this directory)\n"
-        );
-        let _ = out.flush();
-    }
-
-    let token = Arc::new(token);
+    let token = Arc::new(token());
+    let cwd = std::env::current_dir()?;
+    let start = harness_workspace::Workspace::resolve(&cwd)
+        .map(|w| w.root().display().to_string())
+        .unwrap_or_default();
+    let url = format!(
+        "http://127.0.0.1:{bound}/?token={token}&root={}",
+        start
+            .replace('%', "%25")
+            .replace('&', "%26")
+            .replace(' ', "%20")
+    );
+    on_ready(&url);
+    let projects: Projects = Default::default();
     loop {
         let (mut stream, _) = listener.accept().await?;
         let token = token.clone();
-        let events = events.clone();
-        let cmd_tx = cmd_tx.clone();
+        let projects = projects.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle(&mut stream, &token, &events, &cmd_tx).await {
+            if let Err(e) = handle(&mut stream, &token, &projects).await {
                 let _ = respond(
                     &mut stream,
                     "400 Bad Request",
@@ -246,57 +620,165 @@ pub async fn serve(port: u16) -> Result<()> {
     }
 }
 
-async fn handle(
-    stream: &mut TcpStream,
-    token: &str,
-    events: &broadcast::Sender<Value>,
-    cmd_tx: &mpsc::UnboundedSender<Cmd>,
-) -> Result<()> {
-    let (method, target, _, _, body) = read_request(stream).await?;
-    let (path, query) = match target.split_once('?') {
-        Some((p, q)) => (p.to_string(), q.to_string()),
-        None => (target.clone(), String::new()),
-    };
-    let supplied = query
-        .split('&')
-        .find_map(|kv| kv.strip_prefix("token="))
+/// `harness web [port]` — serve and print the URL.
+pub async fn serve(port: u16) -> Result<()> {
+    serve_with(port, |url| {
+        use std::io::Write;
+        // A closed pipe (`harness web | head -1`) must not kill the server.
+        let mut out = std::io::stdout().lock();
+        let _ = writeln!(
+            out,
+            "harness web → {url}\n  localhost only · token required"
+        );
+        let _ = out.flush();
+    })
+    .await
+}
+
+/// `harness app` — serve on a free port and open it in an app window.
+pub async fn app() -> Result<()> {
+    serve_with(0, |url| {
+        eprintln!("harness app → {url}");
+        if let Err(e) = open_window(url) {
+            eprintln!("could not open a window ({e}); open the URL above in a browser");
+        }
+    })
+    .await
+}
+
+/// A chromeless app window: a Chromium-family browser's `--app` mode when one
+/// is installed (own window, no tabs or address bar), else the default browser.
+fn open_window(url: &str) -> Result<()> {
+    let profile = harness_workspace::harness_home()?.join("app-window");
+    let app_flag = format!("--app={url}");
+    let profile_flag = format!("--user-data-dir={}", profile.display());
+    #[cfg(target_os = "macos")]
+    {
+        for app in [
+            "Google Chrome",
+            "Microsoft Edge",
+            "Brave Browser",
+            "Chromium",
+            "Arc",
+        ] {
+            if Path::new(&format!("/Applications/{app}.app")).exists() {
+                std::process::Command::new("open")
+                    .args(["-na", app, "--args", &app_flag, &profile_flag])
+                    .spawn()?;
+                return Ok(());
+            }
+        }
+        std::process::Command::new("open").arg(url).spawn()?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        for bin in [
+            "google-chrome",
+            "chromium",
+            "chromium-browser",
+            "microsoft-edge",
+            "brave-browser",
+        ] {
+            if std::process::Command::new(bin)
+                .args([&app_flag, &profile_flag])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .is_ok()
+            {
+                return Ok(());
+            }
+        }
+        std::process::Command::new("xdg-open").arg(url).spawn()?;
+        Ok(())
+    }
+}
+
+async fn handle(stream: &mut TcpStream, token: &str, projects: &Projects) -> Result<()> {
+    let req = read_request(stream).await?;
+    let supplied = req
+        .token
+        .clone()
+        .or_else(|| req.query.get("token").cloned())
         .unwrap_or_default();
     if supplied != token {
         return respond(stream, "401 Unauthorized", "text/plain", "bad token").await;
     }
-    match (method.as_str(), path.as_str()) {
+    let body: Value = if req.body.is_empty() {
+        json!({})
+    } else {
+        serde_json::from_slice(&req.body).context("body must be JSON")?
+    };
+    let q = |k: &str| req.query.get(k).cloned().unwrap_or_default();
+    match (req.method.as_str(), req.path.as_str()) {
         ("GET", "/") => respond(stream, "200 OK", "text/html; charset=utf-8", PAGE).await,
         ("GET", "/health") => respond(stream, "200 OK", "application/json", r#"{"ok":true}"#).await,
-        ("POST", "/rpc") => {
-            let req: Value = serde_json::from_slice(&body).context("body must be JSON")?;
-            let method = req["method"]
-                .as_str()
-                .context("method required")?
-                .to_string();
-            let params = req.get("params").cloned().unwrap_or(json!({}));
-            let (tx, rx) = oneshot::channel();
-            cmd_tx
-                .send(Cmd {
-                    method: method.clone(),
-                    params,
-                    reply: tx,
-                })
-                .map_err(|_| anyhow::anyhow!("session is gone"))?;
-            let out = match tokio::time::timeout(std::time::Duration::from_secs(600), rx).await {
-                Ok(Ok(Ok(v))) => json!({"ok": true, "result": v}),
-                Ok(Ok(Err(e))) => json!({"ok": false, "error": e}),
-                Ok(Err(_)) => json!({"ok": false, "error": "session ended"}),
-                Err(_) => json!({"ok": false, "error": "timed out"}),
+        ("GET", "/api/projects") => {
+            let keep = q("root");
+            let r = tokio::task::spawn_blocking(move || list_projects(&keep)).await?;
+            json_reply(stream, r.map_err(|e| e.to_string())).await
+        }
+        ("GET", "/api/transcript") => {
+            let path = PathBuf::from(q("path"));
+            let r = tokio::task::spawn_blocking(move || transcript(&path)).await?;
+            json_reply(stream, r.map_err(|e| e.to_string())).await
+        }
+        ("GET", "/api/changes") => {
+            let root = PathBuf::from(q("root"));
+            let r = tokio::task::spawn_blocking(move || changes(&root)).await?;
+            json_reply(stream, r.map_err(|e| e.to_string())).await
+        }
+        ("GET", "/api/models") => json_reply(stream, Ok(models())).await,
+        ("POST", "/api/rpc") => {
+            let root = body["root"].as_str().unwrap_or_default().to_string();
+            let method = body["method"].as_str().unwrap_or_default().to_string();
+            let params = body.get("params").cloned().unwrap_or(json!({}));
+            let r = match project(projects, &root).await {
+                Ok(p) => call(&p, &method, params).await,
+                Err(e) => Err(e.to_string()),
             };
-            respond(stream, "200 OK", "application/json", &out.to_string()).await
+            json_reply(stream, r).await
+        }
+        ("POST", "/api/permission") => {
+            let root = body["root"].as_str().unwrap_or_default().to_string();
+            let r = match project(projects, &root).await {
+                Ok(p) => {
+                    let id = body["id"].as_u64().unwrap_or_default();
+                    let answer = match body["answer"].as_str() {
+                        Some(a @ ("y" | "a" | "n")) => a.to_string(),
+                        _ => "n".to_string(),
+                    };
+                    p.cmd
+                        .send(Cmd::Answer { id, answer })
+                        .map(|_| json!({"answered": id}))
+                        .map_err(|_| "project connection is gone".to_string())
+                }
+                Err(e) => Err(e.to_string()),
+            };
+            json_reply(stream, r).await
         }
         ("GET", "/events") => {
-            let mut rx = events.subscribe();
+            let p = project(projects, &q("root")).await?;
+            let mut rx = p.events.subscribe();
             let head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
                         cache-control: no-store\r\nconnection: keep-alive\r\n\r\n";
             stream.write_all(head.as_bytes()).await?;
+            // Questions still waiting for an answer, for a page that reloaded.
+            let waiting: Vec<(u64, String)> = p
+                .asks
+                .lock()
+                .expect("asks")
+                .iter()
+                .map(|(k, v)| (*k, v.clone()))
+                .collect();
+            for (id, question) in waiting {
+                let v = json!({"method": "permission/request", "params": {"id": id, "question": question}});
+                stream
+                    .write_all(format!("data: {v}\n\n").as_bytes())
+                    .await?;
+            }
             stream.flush().await?;
-            // Keep-alive comments so proxies and browsers hold the stream open.
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(20));
             loop {
                 tokio::select! {
@@ -317,5 +799,23 @@ async fn handle(
             Ok(())
         }
         _ => respond(stream, "404 Not Found", "text/plain", "no such route").await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn query_values_are_decoded() {
+        assert_eq!(url_decode("%2FUsers%2Fme%20x+y"), "/Users/me x y");
+        assert_eq!(url_decode("100%"), "100%");
+    }
+
+    #[test]
+    fn tokens_are_long_and_differ() {
+        let (a, b) = (token(), token());
+        assert_eq!(a.len(), 32);
+        assert_ne!(a, b);
     }
 }

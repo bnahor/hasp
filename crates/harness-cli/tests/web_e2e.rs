@@ -49,14 +49,65 @@ fn post(path: &str, body: &str) -> String {
     )
 }
 
-async fn start_web() -> (tokio::process::Child, u16, String, tempfile::TempDir) {
+fn git(dir: &std::path::Path, args: &[&str]) {
+    let ok = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap()
+        .status
+        .success();
+    assert!(ok, "git {args:?}");
+}
+
+/// A server whose working directory is a fresh git repo with one commit
+/// (`project/`, inside the temp HOME). Returns the repo root too.
+async fn start_web() -> (
+    tokio::process::Child,
+    u16,
+    String,
+    tempfile::TempDir,
+    String,
+) {
+    start_web_with(&[]).await
+}
+
+async fn start_web_with(
+    env: &[(&str, &str)],
+) -> (
+    tokio::process::Child,
+    u16,
+    String,
+    tempfile::TempDir,
+    String,
+) {
     let home = tempfile::tempdir().unwrap();
+    let repo = home.path().join("project");
+    std::fs::create_dir(&repo).unwrap();
+    git(&repo, &["init", "-q"]);
+    std::fs::write(repo.join("a.txt"), "one\ntwo\n").unwrap();
+    git(&repo, &["add", "-A"]);
+    git(
+        &repo,
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-qm",
+            "base",
+        ],
+    );
+    let root = repo.canonicalize().unwrap().display().to_string();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_harness"));
-    cmd.arg("web")
+    cmd.current_dir(&repo)
+        .arg("web")
         .arg("0")
         .env("HOME", home.path())
         .env("HARNESS_PROVIDER", "mock")
         .env("HARNESS_SOCKET", home.path().join("web.sock"))
+        .envs(env.iter().copied())
         .stdout(std::process::Stdio::piped())
         // Kept in a file so a failure can say what the server said.
         .stderr(std::fs::File::create(home.path().join("web.stderr")).unwrap());
@@ -67,7 +118,7 @@ async fn start_web() -> (tokio::process::Child, u16, String, tempfile::TempDir) 
         .expect("web server prints its URL")
         .unwrap()
         .expect("a URL line");
-    // harness web → http://127.0.0.1:PORT/?token=TOKEN
+    // harness web → http://127.0.0.1:PORT/?token=TOKEN&root=ROOT
     let rest = line
         .split("http://127.0.0.1:")
         .nth(1)
@@ -77,78 +128,174 @@ async fn start_web() -> (tokio::process::Child, u16, String, tempfile::TempDir) 
         .split("token=")
         .nth(1)
         .expect("token in banner")
+        .split('&')
+        .next()
+        .unwrap()
         .trim()
         .to_string();
-    (child, port, token, home)
+    (child, port, token, home, root)
+}
+
+async fn rpc(
+    home: &std::path::Path,
+    port: u16,
+    token: &str,
+    root: &str,
+    method: &str,
+    params: serde_json::Value,
+) -> serde_json::Value {
+    let body = serde_json::json!({"root": root, "method": method, "params": params});
+    let (status, body) = http(
+        home,
+        port,
+        &post(&format!("/api/rpc?token={token}"), &body.to_string()),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    serde_json::from_str(&body).unwrap()
+}
+
+async fn get_json(home: &std::path::Path, port: u16, path: &str) -> serde_json::Value {
+    let (status, body) = http(home, port, &get(path)).await;
+    assert_eq!(status, 200, "{body}");
+    serde_json::from_str(&body).unwrap()
 }
 
 #[tokio::test]
-async fn serves_the_page_and_drives_a_turn() {
-    let (mut child, port, token, home) = start_web().await;
+async fn serves_the_app_and_drives_a_turn() {
+    let (mut child, port, token, home, root) = start_web().await;
+    let h = home.path();
 
     // No token, no service — a local port is not an authorization.
-    let (status, _) = http(home.path(), port, &get("/")).await;
+    let (status, _) = http(h, port, &get("/")).await;
     assert_eq!(status, 401);
 
-    let (status, page) = http(home.path(), port, &get(&format!("/?token={token}"))).await;
+    let (status, page) = http(h, port, &get(&format!("/?token={token}"))).await;
     assert_eq!(status, 200);
-    assert!(page.contains("harness"), "the page is served");
-    assert!(page.contains("composer"), "and it is the app, not a stub");
+    assert!(
+        page.contains("id=\"composer\"") && page.contains("id=\"sidebar\""),
+        "the app is served"
+    );
 
-    // The session is already open on this directory: stats answer immediately.
-    let (status, body) = http(
-        home.path(),
+    // A project opens on first use: stats answer.
+    let v = rpc(
+        h,
         port,
-        &post(
-            &format!("/rpc?token={token}"),
-            &serde_json::json!({"method": "session/stats"}).to_string(),
-        ),
+        &token,
+        &root,
+        "session/stats",
+        serde_json::json!({}),
     )
     .await;
-    assert_eq!(status, 200);
-    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(v["ok"], true, "{body}");
-    assert!(v["result"]["model"].as_str().is_some(), "{body}");
+    assert_eq!(v["ok"], true, "{v}");
+    assert!(v["result"]["model"].as_str().is_some(), "{v}");
 
     // A prompt runs the real turn through the daemon.
-    let (_, body) = http(
-        home.path(),
+    let v = rpc(
+        h,
         port,
-        &post(
-            &format!("/rpc?token={token}"),
-            &serde_json::json!({"method": "session/prompt", "params": {"prompt": "hi web"}})
-                .to_string(),
-        ),
+        &token,
+        &root,
+        "session/prompt",
+        serde_json::json!({"prompt": "hi app"}),
     )
     .await;
-    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(v["ok"], true, "{body}");
+    assert_eq!(v["ok"], true, "{v}");
     assert!(
         v["result"]["text"]
             .as_str()
             .unwrap_or_default()
-            .contains("echo: hi web"),
-        "{body}"
+            .contains("echo: hi app"),
+        "{v}"
     );
 
-    // History replays for a freshly loaded page.
-    let (_, body) = http(
-        home.path(),
+    // The sidebar lists it under its project, and its transcript replays.
+    let v = get_json(
+        h,
         port,
-        &post(
-            &format!("/rpc?token={token}"),
-            &serde_json::json!({"method": "session/history"}).to_string(),
+        &format!(
+            "/api/projects?token={token}&root={}",
+            root.replace(' ', "%20")
         ),
     )
     .await;
-    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let project = v["result"]["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["root"] == root.as_str())
+        .unwrap_or_else(|| panic!("project listed: {v}"))
+        .clone();
+    let first = &project["sessions"][0];
+    assert_eq!(first["title"], "hi app", "{project}");
+    let path = first["path"].as_str().unwrap().to_string();
+    let v = get_json(
+        h,
+        port,
+        &format!(
+            "/api/transcript?token={token}&path={}",
+            path.replace(' ', "%20")
+        ),
+    )
+    .await;
+    let items = v["result"]["items"].as_array().unwrap();
+    assert_eq!(items[0]["kind"], "user");
+    assert!(items.iter().any(|i| i["kind"] == "assistant"), "{v}");
+
+    // A new session in place, then back to the first one.
+    let v = rpc(h, port, &token, &root, "session/new", serde_json::json!({})).await;
+    assert_eq!(v["ok"], true, "{v}");
+    let fresh = v["result"]["sessionId"].as_str().unwrap().to_string();
+    assert_ne!(fresh, first["id"].as_str().unwrap());
+    let v = rpc(
+        h,
+        port,
+        &token,
+        &root,
+        "session/load",
+        serde_json::json!({"path": path}),
+    )
+    .await;
+    assert_eq!(v["ok"], true, "{v}");
+    let v = rpc(
+        h,
+        port,
+        &token,
+        &root,
+        "session/stats",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(v["result"]["sessionId"], first["id"], "{v}");
+
+    // Changes: the working tree against HEAD, diffed.
+    std::fs::write(std::path::Path::new(&root).join("a.txt"), "one\nTWO\n").unwrap();
+    let v = get_json(
+        h,
+        port,
+        &format!(
+            "/api/changes?token={token}&root={}",
+            root.replace(' ', "%20")
+        ),
+    )
+    .await;
+    let f = &v["result"]["files"][0];
+    assert_eq!(
+        (
+            f["path"].as_str(),
+            f["added"].as_u64(),
+            f["removed"].as_u64()
+        ),
+        (Some("a.txt"), Some(1), Some(1)),
+        "{v}"
+    );
     assert!(
-        v["result"]["messages"]
+        f["hunks"][0]["lines"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|m| m["text"].as_str().unwrap_or_default().contains("hi web")),
-        "{body}"
+            .any(|l| l[0] == "add" && l[3] == "TWO"),
+        "{v}"
     );
 
     let _ = child.kill().await;
@@ -156,13 +303,19 @@ async fn serves_the_page_and_drives_a_turn() {
 
 #[tokio::test]
 async fn streams_assistant_deltas_over_sse() {
-    let (mut child, port, token, _home) = start_web().await;
+    let (mut child, port, token, _home, root) = start_web().await;
 
     // Open the event stream, then prompt on a second connection: the deltas
     // must arrive on the stream while the turn is still running.
     let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
     stream
-        .write_all(get(&format!("/events?token={token}")).as_bytes())
+        .write_all(
+            get(&format!(
+                "/events?token={token}&root={}",
+                root.replace(' ', "%20")
+            ))
+            .as_bytes(),
+        )
         .await
         .unwrap();
     stream.flush().await.unwrap();
@@ -173,9 +326,9 @@ async fn streams_assistant_deltas_over_sse() {
         "event stream opened"
     );
 
-    let prompt = serde_json::json!({"method": "session/prompt", "params": {"prompt": "stream me"}});
+    let prompt = serde_json::json!({"root": root, "method": "session/prompt", "params": {"prompt": "stream me"}});
     let mut s2 = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
-    s2.write_all(post(&format!("/rpc?token={token}"), &prompt.to_string()).as_bytes())
+    s2.write_all(post(&format!("/api/rpc?token={token}"), &prompt.to_string()).as_bytes())
         .await
         .unwrap();
     s2.flush().await.unwrap();
@@ -205,6 +358,80 @@ async fn streams_assistant_deltas_over_sse() {
         "deltas reached the browser stream: {seen}"
     );
 
+    let _ = child.kill().await;
+}
+
+/// The old page could only deny approvals; the app asks and answers them.
+#[tokio::test]
+async fn approvals_are_asked_in_the_app_and_answered_back() {
+    let script = serde_json::json!([
+        {"tool": "bash", "input": {"command": "touch approved.txt"}},
+        {"text": "done"}
+    ])
+    .to_string();
+    let (mut child, port, token, home, root) =
+        start_web_with(&[("HARNESS_MOCK_SCRIPT", &script)]).await;
+    let enc = root.replace(' ', "%20");
+
+    let mut events = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    events
+        .write_all(get(&format!("/events?token={token}&root={enc}")).as_bytes())
+        .await
+        .unwrap();
+
+    // The prompt blocks until the approval is answered, so it runs aside.
+    let prompt = serde_json::json!({
+        "root": root, "method": "session/prompt", "params": {"prompt": "make the file"}
+    });
+    let prompt_path = format!("/api/rpc?token={token}");
+    let turn = tokio::spawn(async move {
+        let mut s = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        s.write_all(post(&prompt_path, &prompt.to_string()).as_bytes())
+            .await
+            .unwrap();
+        let mut out = Vec::new();
+        s.read_to_end(&mut out).await.unwrap();
+        String::from_utf8_lossy(&out).to_string()
+    });
+
+    let mut seen = String::new();
+    let id = loop {
+        let mut buf = [0u8; 4096];
+        let n = tokio::time::timeout(Duration::from_secs(30), events.read(&mut buf))
+            .await
+            .expect("the question arrives")
+            .unwrap();
+        assert!(n > 0, "stream closed: {seen}");
+        seen.push_str(&String::from_utf8_lossy(&buf[..n]));
+        if let Some(line) = seen.lines().find(|l| l.contains("permission/request")) {
+            let v: serde_json::Value =
+                serde_json::from_str(line.trim_start_matches("data: ")).unwrap();
+            let q = v["params"]["question"].as_str().unwrap_or_default();
+            assert!(q.contains("touch approved.txt"), "{v}");
+            break v["params"]["id"].as_u64().unwrap();
+        }
+    };
+    let answer = serde_json::json!({"root": root, "id": id, "answer": "y"});
+    let (status, body) = http(
+        home.path(),
+        port,
+        &post(
+            &format!("/api/permission?token={token}"),
+            &answer.to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+
+    let reply = tokio::time::timeout(Duration::from_secs(30), turn)
+        .await
+        .expect("the turn finishes once approved")
+        .unwrap();
+    assert!(reply.contains("\"ok\":true"), "{reply}");
+    assert!(
+        std::path::Path::new(&root).join("approved.txt").exists(),
+        "the approved command ran"
+    );
     let _ = child.kill().await;
 }
 
