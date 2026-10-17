@@ -645,6 +645,7 @@ pub async fn run_turn_shared<C: EngineCell>(
             ts: now_ms(),
             images,
         });
+        journal_ok(&eng.session, sink)?;
         eng.deliver_notices(sink);
         if !eng.hook_warnings_shown {
             eng.hook_warnings_shown = true;
@@ -659,6 +660,7 @@ pub async fn run_turn_shared<C: EngineCell>(
     for _ in 0..MAX_SAMPLES_PER_TURN {
         let (req, provider) = {
             let eng = cell.lock().await;
+            journal_ok(&eng.session, sink)?; // no model request on an undurable history
             (eng.build_request(), eng.provider.clone())
         };
         let t0 = Instant::now();
@@ -738,6 +740,9 @@ pub async fn run_turn_shared<C: EngineCell>(
                 stop_reason: turn.stop_reason,
                 ts: now_ms(),
             });
+            // The sample's tool calls must be on disk before any of them runs:
+            // otherwise a crash leaves effects that history never asked for.
+            journal_ok(&eng.session, sink)?;
         }
 
         let calls: Vec<(String, String, Value)> = turn
@@ -775,6 +780,7 @@ pub async fn run_turn_shared<C: EngineCell>(
         }
         let cancelled =
             run_tool_calls(cell, calls, &mut stats, sink, &cancel_flag, &cancel_notify).await;
+        journal_ok(&cell.lock().await.session, sink)?;
         // Child exits and heartbeats land here between tool calls — the whole
         // point of the notice inbox. Delivering only at turn start left a
         // parent blind to its own children's reports for the rest of a long
@@ -796,6 +802,15 @@ pub async fn run_turn_shared<C: EngineCell>(
     maybe_compact(cell, sink).await;
     stats.ms = start.elapsed().as_millis();
     Ok(stats)
+}
+
+/// Stop the turn when the journal has faulted (see `SessionManager::fault`).
+fn journal_ok(session: &SessionManager, sink: &mut dyn TurnSink) -> Result<()> {
+    if let Err(e) = session.ensure_durable() {
+        sink.on_note(&format!("▪ stopping: {e}. Nothing more runs in this session; reopen it to continue."));
+        return Err(anyhow::anyhow!("{e}"));
+    }
+    Ok(())
 }
 
 /// Compact when the context is over the threshold.
@@ -895,6 +910,11 @@ async fn run_tool_calls<C: EngineCell>(
             }
         }
         let batch = &calls[i..end];
+        if cell.lock().await.session.fault().is_some() {
+            // An earlier result couldn't be journaled: run nothing more. The
+            // caller sees the fault and ends the turn with an error.
+            return true;
+        }
         let outputs: Vec<(ToolOutput, u64)> = if cancelled {
             batch
                 .iter()

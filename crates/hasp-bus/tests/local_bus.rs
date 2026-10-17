@@ -164,3 +164,57 @@ async fn spawn_completes_message_triggers_worktree_isolates() {
         .expect("completed child keeps a report");
     assert!(report.contains("echo: status?"), "report: {report}");
 }
+
+/// `mutation: false` promises a read-only helper in the parent's checkout.
+/// Before, such a child got write/edit/bash and the parent's (here: allow-all)
+/// gate, so it could change the very tree the parent was working in.
+#[tokio::test]
+async fn read_only_child_cannot_change_the_shared_checkout() {
+    use hasp_core::{AssistantTurn, ContentBlock, StopReason, Usage};
+    use hasp_provider::mock::MockProvider;
+    let tmp = tempfile::tempdir().unwrap();
+    git_repo(tmp.path());
+    let ws = Workspace::resolve(tmp.path()).unwrap();
+    let call = |id: &str, name: &str, args: serde_json::Value| ContentBlock::ToolCall {
+        id: id.into(),
+        name: name.into(),
+        arguments: args,
+    };
+    let factory: ProviderFactory = Arc::new(move || {
+        let turns = vec![
+            AssistantTurn {
+                blocks: vec![
+                    call("w", "write", serde_json::json!({"path": "written.txt", "content": "x"})),
+                    call("e", "edit", serde_json::json!({"path": "a.txt", "old": "x", "new": "y"})),
+                    call("b", "bash", serde_json::json!({"command": "python3 -c \"open('probe.txt','w').write('x')\""})),
+                    call("g", "bash", serde_json::json!({"command": "git status"})),
+                ],
+                usage: Usage::default(),
+                stop_reason: StopReason::ToolUse,
+            },
+            AssistantTurn {
+                blocks: vec![ContentBlock::Text { text: "done".into() }],
+                usage: Usage::default(),
+                stop_reason: StopReason::Stop,
+            },
+        ];
+        Ok(Box::new(MockProvider::new(turns)) as Box<dyn Provider>)
+    });
+    let gate_factory: GateFactory = Arc::new(|| Box::new(AllowGate) as Box<dyn Gate>);
+    let inbox: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let bus = LocalBus::new(ws, "mock".into(), 1024, factory, gate_factory, inbox, None);
+    let h = bus
+        .spawn_child(SpawnRequest { task: "look around".into(), name: None, mutation: false, environment: None })
+        .await
+        .unwrap();
+    wait_completed(&bus, &h.child_id).await;
+    assert!(!tmp.path().join("written.txt").exists());
+    assert!(!tmp.path().join("probe.txt").exists());
+    assert_eq!(std::fs::read_to_string(tmp.path().join("a.txt")).unwrap(), "x");
+
+    let names: Vec<String> = hasp_bus::read_only_child_tools().iter().map(|t| t.spec().name).collect();
+    assert!(!names.iter().any(|n| n == "write" || n == "edit" || n == "job"), "{names:?}");
+    let mut sorted = names.clone();
+    sorted.sort();
+    assert_eq!(names, sorted, "tool order stays name-sorted (cache contract)");
+}

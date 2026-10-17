@@ -2,7 +2,7 @@
 //! and the TUI (prompt request over a channel, answered with y/a/n).
 
 use hasp_core::{Gate, GateDecision};
-use hasp_tools::{escapes_cwd, is_simple, seed_allowlist};
+use hasp_tools::{escapes_cwd, is_simple, read_only_invocation, seed_allowlist, split_words};
 use std::io::Write;
 use std::sync::Mutex;
 use std::sync::mpsc::Sender;
@@ -12,6 +12,11 @@ pub struct GateCore {
     pub interactive: bool,
     pub allowlist: Vec<String>,
     pub tools: ToolPolicy,
+    /// Explicitly allowed command prefixes from ~/.hasp/policy.json `bash.allow`
+    /// (e.g. "cargo test", "make check"): build and test workflows the owner
+    /// has vouched for. Still subject to the metacharacter/cwd rules and the
+    /// OS sandbox.
+    pub bash_allow: Vec<Vec<String>>,
     approved_bash: Vec<String>,
     approved_writes: Vec<String>,
     approved_tools: Vec<String>,
@@ -85,6 +90,35 @@ impl ToolPolicy {
     }
 }
 
+/// `{"bash": {"allow": ["cargo test", "make check"]}}` in ~/.hasp/policy.json.
+/// Each entry is a word prefix; "cargo test" allows `cargo test -p x` but not
+/// `cargo run`. Nothing is allowed by default.
+pub fn load_bash_allow() -> Vec<Vec<String>> {
+    let Ok(home) = hasp_workspace::hasp_home() else {
+        return Vec::new();
+    };
+    let Ok(text) = std::fs::read_to_string(home.join("policy.json")) else {
+        return Vec::new();
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Vec::new(); // ToolPolicy::load already reported the parse error
+    };
+    bash_allow_from_json(&v["bash"])
+}
+
+pub fn bash_allow_from_json(v: &serde_json::Value) -> Vec<Vec<String>> {
+    v["allow"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|s| s.as_str())
+                .filter_map(split_words)
+                .filter(|w| !w.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn parse_mode(s: &str) -> Option<ToolMode> {
     match s.trim().to_ascii_lowercase().as_str() {
         "auto" => Some(ToolMode::Auto),
@@ -152,6 +186,7 @@ impl GateCore {
             interactive,
             allowlist: seed_allowlist().iter().map(|s| s.to_string()).collect(),
             tools: ToolPolicy::load(),
+            bash_allow: load_bash_allow(),
             approved_bash: Vec::new(),
             approved_writes: Vec::new(),
             approved_tools: Vec::new(),
@@ -213,7 +248,16 @@ impl GateCore {
         if simple && self.approved_bash.contains(&first) {
             return GateDecision::Allow;
         }
-        if simple && self.allowlist.contains(&first) && !escapes_cwd(command) {
+        // Without asking: only invocations proven read-only (tool *and* its
+        // arguments), or a prefix the owner explicitly allowed in policy.json.
+        if simple
+            && !escapes_cwd(command)
+            && self.allowlist.contains(&first)
+            && read_only_invocation(command)
+        {
+            return GateDecision::Allow;
+        }
+        if simple && !escapes_cwd(command) && self.explicitly_allowed(command) {
             return GateDecision::Allow;
         }
         if !self.interactive {
@@ -229,6 +273,15 @@ impl GateCore {
             }
             _ => GateDecision::Deny("user declined".into()),
         }
+    }
+
+    fn explicitly_allowed(&self, command: &str) -> bool {
+        let Some(words) = split_words(command) else {
+            return false;
+        };
+        self.bash_allow
+            .iter()
+            .any(|prefix| !prefix.is_empty() && words.len() >= prefix.len() && words[..prefix.len()] == prefix[..])
     }
 
     pub fn decide_write(&mut self, path: &str, ask: impl FnOnce(&str) -> char) -> GateDecision {
@@ -384,6 +437,37 @@ mod tests {
         assert!(matches!(g.decide_tool("mcp__m__mesh_context", &json!({}), |_| 'y'), GateDecision::Deny(_)));
         let mut y = GateCore::new(true, true).with_tool_policy(ToolPolicy::from_json(&json!({"deny": ["mcp__*__mesh_power"]})));
         assert!(matches!(y.decide_tool("mcp__m__mesh_power", &json!({}), |_| 'y'), GateDecision::Deny(_)));
+    }
+
+    #[test]
+    fn interpreters_and_build_tools_need_approval() {
+        // Regression for the review probe: non-interactive, nothing allowed.
+        let mut g = GateCore::new(false, false);
+        g.bash_allow.clear();
+        let probe = "python3 -c \"open('probe.txt','w').write('harmless')\"";
+        for cmd in [probe, "node -e 1", "cargo build", "make", "pytest", "git commit -m x", "rg --pre ./x y"] {
+            assert!(matches!(g.decide_bash(cmd, |_| 'y'), GateDecision::Deny(_)), "{cmd}");
+        }
+        for cmd in ["git status", "rg -n main src", "ls -la"] {
+            assert_eq!(g.decide_bash(cmd, |_| panic!("asked")), GateDecision::Allow, "{cmd}");
+        }
+        // interactive: asked, and allowed only on yes
+        let mut i = GateCore::new(false, true);
+        let mut asked = false;
+        assert_eq!(i.decide_bash("cargo test", |_| { asked = true; 'y' }), GateDecision::Allow);
+        assert!(asked);
+    }
+
+    #[test]
+    fn explicit_bash_policy_allows_named_workflows_only() {
+        let mut g = GateCore::new(false, false);
+        g.bash_allow = bash_allow_from_json(&json!({"allow": ["cargo test", "make check"]}));
+        assert_eq!(g.decide_bash("cargo test -p hasp-core", |_| 'n'), GateDecision::Allow);
+        assert_eq!(g.decide_bash("make check", |_| 'n'), GateDecision::Allow);
+        assert!(matches!(g.decide_bash("cargo run", |_| 'n'), GateDecision::Deny(_)));
+        // structural rules still apply to allowed prefixes
+        assert!(matches!(g.decide_bash("cargo test; rm -rf x", |_| 'n'), GateDecision::Deny(_)));
+        assert!(matches!(g.decide_bash("cargo test --manifest-path ../other/Cargo.toml", |_| 'n'), GateDecision::Deny(_)));
     }
 
     #[test]

@@ -9,6 +9,7 @@ pub mod diff;
 mod fs;
 pub mod jobs;
 pub mod sandbox;
+pub mod recall;
 mod search;
 mod skill;
 mod symbols;
@@ -16,9 +17,10 @@ mod todo;
 mod web;
 
 pub use agent::{AgentsTool, GoalCompleteTool, MessageTool, SpawnTool, SubagentTool};
-pub use bash::{BashTool, escapes_cwd, is_simple, seed_allowlist};
+pub use bash::{BashTool, escapes_cwd, is_simple, read_only_invocation, seed_allowlist, split_words};
 pub use fs::{EditTool, ReadTool, WriteTool};
 pub use jobs::{JobTable, JobTool};
+pub use recall::{MemoryTool, RecallTool, WorkflowProposeTool};
 pub use search::{GlobTool, GrepTool};
 pub use skill::SkillTool;
 pub use symbols::SymbolSearchTool;
@@ -34,6 +36,9 @@ pub fn builtins() -> Vec<Box<dyn Tool>> {
     tools.push(Box::new(agent::AgentsTool));
     tools.push(Box::new(agent::GoalCompleteTool));
     tools.push(Box::new(agent::SubagentTool::default()));
+    tools.push(Box::new(RecallTool));
+    tools.push(Box::new(MemoryTool));
+    tools.push(Box::new(WorkflowProposeTool));
     tools.sort_by_key(|t| t.spec().name);
     tools
 }

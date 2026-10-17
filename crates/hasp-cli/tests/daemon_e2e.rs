@@ -1386,3 +1386,82 @@ async fn requests_answer_while_a_slow_turn_is_in_flight() {
         .expect("daemon exits after shutdown")
         .unwrap();
 }
+
+/// A daemon restart brings back an explicitly enabled resident and its
+/// schedules with no client connecting: intervals resume, a one-shot that
+/// already fired never fires again, one whose time passed during the downtime
+/// is expired (not run late), and one still in the future fires on time.
+#[tokio::test]
+async fn enabled_resident_and_schedules_survive_a_daemon_restart() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let sock = tmp.path().join("d.sock");
+    let mut child = spawn_daemon(tmp.path(), &[]).await;
+
+    let mut c = WireClient::connect(&sock).await.unwrap();
+    c.initialize().await.unwrap();
+    let s = c
+        .request(METHOD_SESSION_CONTINUE, serde_json::json!({"cwd": ws.to_string_lossy()}))
+        .await
+        .unwrap();
+    let path = std::path::PathBuf::from(s["path"].as_str().unwrap());
+    let set = |v: serde_json::Value| v;
+    for params in [
+        set(serde_json::json!({"action": "add", "instruction": "tick", "everyMs": 200})), // hb-1
+        set(serde_json::json!({"action": "add", "instruction": "near", "inMs": 50})),     // hb-2: fires now
+        set(serde_json::json!({"action": "add", "instruction": "later", "inMs": 3500})),  // hb-3: after restart
+    ] {
+        c.request(METHOD_HEARTBEAT_SET, params).await.unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    // hb-4 comes due while the daemon is down
+    c.request(METHOD_HEARTBEAT_SET, serde_json::json!({"action": "add", "instruction": "missed", "inMs": 400}))
+        .await
+        .unwrap();
+
+    // `hasp resident enable` from the workspace, against the same HOME.
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_hasp"))
+        .args(["resident", "enable"])
+        .current_dir(&ws)
+        .env("HOME", tmp.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+
+    c.shutdown().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), child.wait()).await.unwrap().unwrap();
+    let before = std::fs::read_to_string(&path).unwrap();
+    let ticks_before = before.matches("echo: [heartbeat hb-1] tick").count();
+    assert_eq!(before.matches("echo: [heartbeat hb-2] near").count(), 1);
+    tokio::time::sleep(Duration::from_millis(900)).await; // hb-4's time passes
+
+    // Restart. Nobody connects.
+    let mut child = spawn_daemon(tmp.path(), &[]).await;
+    tokio::time::sleep(Duration::from_millis(3600)).await;
+    let after = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        after.matches("echo: [heartbeat hb-1] tick").count() >= ticks_before + 3,
+        "interval schedule resumed after restart with no client"
+    );
+    assert_eq!(after.matches("echo: [heartbeat hb-2] near").count(), 1, "fired one-shot not replayed");
+    assert_eq!(after.matches("[heartbeat hb-4] missed").count(), 0, "missed one-shot not run late");
+    assert!(after.contains(r#""action":"expired","hb_id":"hb-4""#), "{after}");
+    assert_eq!(after.matches("echo: [heartbeat hb-3] later").count(), 1, "future one-shot fired once");
+
+    // New schedules don't reuse journaled ids.
+    let mut c = WireClient::connect(&sock).await.unwrap();
+    c.initialize().await.unwrap();
+    let again = c
+        .request(METHOD_SESSION_CONTINUE, serde_json::json!({"cwd": ws.to_string_lossy()}))
+        .await
+        .unwrap();
+    assert_eq!(again["adopted"].as_bool(), Some(true), "joins the restored resident");
+    let added = c
+        .request(METHOD_HEARTBEAT_SET, serde_json::json!({"action": "add", "instruction": "fresh", "everyMs": 60000}))
+        .await
+        .unwrap();
+    assert_eq!(added["id"].as_str(), Some("hb-5"), "{added}");
+    c.shutdown().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), child.wait()).await.unwrap().unwrap();
+}

@@ -68,6 +68,47 @@ impl WireClient {
         }
     }
 
+    /// Like `request`, but permission questions from the daemon go to
+    /// `on_permission` (answer 'y', 'a' or 'n') instead of an automatic "n";
+    /// `on_update` sees `session/update` notifications (progress).
+    pub async fn request_with<P, Fut>(
+        &mut self,
+        method: &str,
+        params: Value,
+        mut on_permission: P,
+        mut on_update: impl FnMut(&Value),
+    ) -> Result<Value>
+    where
+        P: FnMut(String) -> Fut,
+        Fut: std::future::Future<Output = char>,
+    {
+        self.next_id += 1;
+        let id = self.next_id;
+        self.send(&Wire::request(id, method, params)).await?;
+        loop {
+            let mut line = String::new();
+            if self.rd.read_line(&mut line).await? == 0 {
+                bail!("daemon closed the connection");
+            }
+            let Some(msg) = decode(&line) else { continue };
+            match msg {
+                Wire::Response { id: rid, result, error } if rid == id => {
+                    if let Some(e) = error {
+                        bail!("daemon error {}: {}", e.code, e.message);
+                    }
+                    return Ok(result.unwrap_or(Value::Null));
+                }
+                Wire::Request { id: rid, method, params } if method == METHOD_PERMISSION_REQUEST => {
+                    let q = params["question"].as_str().unwrap_or("").to_string();
+                    let answer = on_permission(q).await;
+                    self.send(&Wire::ok(rid, serde_json::json!({"answer": answer.to_string()}))).await?;
+                }
+                Wire::Notification { params, .. } => on_update(&params),
+                _ => {}
+            }
+        }
+    }
+
     pub async fn initialize(&mut self) -> Result<()> {
         self.request(
             METHOD_INITIALIZE,

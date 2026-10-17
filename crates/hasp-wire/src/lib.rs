@@ -17,6 +17,9 @@ pub const METHOD_SESSION_CONTINUE: &str = "session/continue";
 pub const METHOD_SESSION_LOAD: &str = "session/load";
 pub const METHOD_SESSION_PROMPT: &str = "session/prompt";
 pub const METHOD_SESSION_CANCEL: &str = "session/cancel";
+/// Deliver text into the running turn at its next boundary (the notice inbox);
+/// when idle it waits for the next turn. Never starts a turn by itself.
+pub const METHOD_SESSION_STEER: &str = "session/steer";
 pub const METHOD_SESSION_NAME: &str = "session/name";
 pub const METHOD_SESSION_STATS: &str = "session/stats";
 pub const METHOD_SESSION_HISTORY: &str = "session/history";

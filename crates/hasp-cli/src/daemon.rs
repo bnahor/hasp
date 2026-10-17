@@ -92,6 +92,7 @@ pub async fn serve(socket: PathBuf) -> Result<()> {
 
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
     let registry: Registry = Arc::new(Mutex::new(HashMap::new()));
+    restore_residents(&registry).await;
     let next_client_id = Arc::new(std::sync::atomic::AtomicU64::new(1));
     let mut tasks: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
     loop {
@@ -350,6 +351,59 @@ enum ResidentSlot {
     Ready(Arc<Resident>),
 }
 
+/// Bring back the sessions someone explicitly enabled (`hasp resident enable`,
+/// ~/.hasp/residents.json) so their schedules run again without waiting for a
+/// client. Never starts a turn by itself; see residents.rs for what restore
+/// does with interrupted turns and missed schedules. Failures are reported and
+/// skipped: one broken entry must not keep the daemon from serving the rest.
+async fn restore_residents(registry: &Registry) {
+    let manifest = match crate::residents::manifest_path().and_then(|p| crate::residents::Manifest::load(&p)) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("haspd: not restoring residents: {e:#}");
+            return;
+        }
+    };
+    for entry in manifest.residents {
+        let ws = match Workspace::resolve(&entry.cwd) {
+            Ok(ws) => ws,
+            Err(e) => {
+                eprintln!("haspd: resident {}: {e}", entry.cwd.display());
+                continue;
+            }
+        };
+        let key = ws.session_key();
+        let session = match SessionManager::open(&entry.session) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("haspd: resident {}: can't open {}: {e}", entry.cwd.display(), entry.session.display());
+                continue;
+            }
+        };
+        if let Some(t) = &session.recovered_tail {
+            eprintln!(
+                "haspd: resident {}: set aside a torn final journal record ({} bytes) in {}",
+                entry.cwd.display(),
+                t.bytes,
+                t.sidecar.display()
+            );
+        }
+        match build_resident(ws, session, entry.environment.clone()).await {
+            Ok((resident, repaired)) => {
+                eprintln!(
+                    "haspd: restored resident {} ({}){}",
+                    entry.cwd.display(),
+                    resident.session_id(),
+                    if repaired > 0 { format!(", closed {repaired} interrupted tool call(s)") } else { String::new() }
+                );
+                registry.lock().await.insert(key, ResidentSlot::Ready(resident.clone()));
+                tokio::spawn(heartbeat_loop(resident));
+            }
+            Err(e) => eprintln!("haspd: resident {}: {e}", entry.cwd.display()),
+        }
+    }
+}
+
 /// Tells every resident to stop scheduling new work. Turns already running are
 /// left to the shutdown drain so their final replies still reach a client.
 async fn stop_residents(registry: &Registry) {
@@ -389,7 +443,7 @@ fn apply_hb_outcome(rt: &mut HbRuntime, ok: bool, now_ms: i64) {
 /// First due time for a heartbeat armed or resumed at `now`. An interval adds
 /// a delay; cron jumps to its next occurrence, which may be far away — or
 /// beyond the search window, which parks it.
-fn initial_due(now: i64, cron: Option<&hasp_core::cron::CronSpec>, delay_ms: Option<u64>) -> i64 {
+pub(crate) fn initial_due(now: i64, cron: Option<&hasp_core::cron::CronSpec>, delay_ms: Option<u64>) -> i64 {
     match cron {
         Some(spec) => spec
             .next_due(now.max(0) as u64)
@@ -654,6 +708,7 @@ impl Handler {
             }
             hasp_wire::METHOD_SESSION_PROMPT => self.prompt(id, params),
             hasp_wire::METHOD_SESSION_RESIDENTS => self.residents(id).await,
+            hasp_wire::METHOD_SESSION_STEER => self.steer(id, params),
             hasp_wire::METHOD_SESSION_COMPACT => self.compact(id),
             hasp_wire::METHOD_HEARTBEAT_SET => self.heartbeat_set(id, params).await,
             hasp_wire::METHOD_HEARTBEAT_LIST => self.heartbeat_list(id).await,
@@ -816,146 +871,30 @@ impl Handler {
                 }
             },
         };
-        let session_id = session.header.id.clone();
-        let path = session
-            .path
-            .as_ref()
-            .map(|p| p.display().to_string())
-            .unwrap_or_default();
-        let repaired_tool_calls = session.repaired_tool_calls;
-
-        let factory = provider_factory();
-        let model = default_model_for(&provider_name());
-        let mut tools = hasp_tools::builtins_for(ws.root());
-        tools.extend(hasp_mcp::tools_for(&ws).await);
-        // `--env`: this session's tools run in a named environment. It is
-        // the resident's for its lifetime; a later client attaching joins it.
         let env_name = params["environment"]
             .as_str()
             .filter(|s| !s.is_empty())
             .map(String::from);
-        if let Some(name) = &env_name {
-            match hasp_env::Environment::open(name, ws.root()).await {
-                Ok(env) => tools = hasp_env::with_environment(tools, &env),
-                Err(e) => {
-                    self.fail_open(id, &key, format!("{e:#}")).await;
-                    return;
+        match build_resident(ws, session, env_name).await {
+            Ok((resident, repaired_tool_calls)) => {
+                if repaired_tool_calls > 0 {
+                    let _ = self.out_tx.send(hasp_wire::encode(&hasp_wire::session_update(
+                        &resident.session_id(),
+                        "note",
+                        &format!(
+                            "▪ last run was interrupted mid-tool: closed {repaired_tool_calls} unfinished tool call(s)"
+                        ),
+                    )));
                 }
+                self.registry
+                    .lock()
+                    .await
+                    .insert(key, ResidentSlot::Ready(resident.clone()));
+                tokio::spawn(heartbeat_loop(resident.clone()));
+                self.attach(id, resident, false);
             }
+            Err(e) => self.fail_open(id, &key, e).await,
         }
-        // The resident's output slot: turn updates and approval questions reach
-        // whichever client is attached, or nobody when the session is detached.
-        let client = SharedClient::default();
-        let mut engine = match (factory)().map_err(|e| e.to_string()).and_then(|provider| {
-            Engine::new(
-                ws.clone(),
-                session,
-                provider,
-                tools,
-                Box::new(WireGate::new(
-                    GateCore::new(yolo_from_env(), true),
-                    client.clone(),
-                )),
-                model.clone(),
-                hasp_provider::max_output_for(&model),
-            )
-            .map_err(|e| e.to_string())
-        }) {
-            Ok(e) => e,
-            Err(e) => {
-                self.fail_open(id, &key, e).await;
-                return;
-            }
-        };
-        // Agent bus: child approvals and child-exit notices reach whichever
-        // client is attached, and simply go nowhere when none is.
-        let child_client = client.clone();
-        let gate_factory: hasp_bus::GateFactory = Arc::new(move || {
-            Box::new(WireGate::new(
-                GateCore::new(yolo_from_env(), true),
-                child_client.clone(),
-            )) as Box<dyn Gate>
-        });
-        let fanout_client = client.clone();
-        let fanout: hasp_bus::NoticeFanout = Arc::new(move |note: &str| {
-            fanout_client.update("note", note);
-        });
-        let bus = Arc::new(
-            hasp_bus::LocalBus::new(
-                ws.clone(),
-                model.clone(),
-                hasp_provider::max_output_for(&model),
-                factory,
-                gate_factory,
-                engine.notice_inbox(),
-                Some(fanout),
-            )
-            .with_environment(env_name),
-        );
-        engine.set_bus(bus.clone());
-        if repaired_tool_calls > 0 {
-            let _ = self.out_tx.send(hasp_wire::encode(&hasp_wire::session_update(
-                &session_id,
-                "note",
-                &format!(
-                    "▪ last run was interrupted mid-tool: closed {repaired_tool_calls} unfinished tool call(s)"
-                ),
-            )));
-        }
-        let notice_inbox = engine.notice_inbox();
-        // Re-arm heartbeats journaled in this session (they outlive clients).
-        let journaled = engine.session.heartbeats();
-        let engine = Arc::new(Mutex::new(engine));
-        let canceller = engine.lock().await.canceller();
-        let mut hbs = std::collections::HashMap::new();
-        let now = hasp_core::session::now_ms();
-        for hb in journaled
-            .iter()
-            .filter(|h| h.every_ms.is_some() || h.cron.is_some())
-        {
-            // A hand-edited journal could hold an unparsable expression; it
-            // would be wrong to refuse every restart over it, so it just never
-            // fires.
-            let cron = hb
-                .cron
-                .as_deref()
-                .and_then(|e| hasp_core::cron::parse(e).ok());
-            let next_due_ms = initial_due(now, cron.as_ref(), hb.every_ms);
-            hbs.insert(
-                hb.id.clone(),
-                HbRuntime {
-                    instruction: hb.instruction.clone(),
-                    mode: hb.mode.clone(),
-                    every_ms: hb.every_ms,
-                    cron,
-                    paused: hb.paused,
-                    failures: 0,
-                    next_due_ms,
-                },
-            );
-        }
-        let heartbeats = Arc::new(Mutex::new(hbs));
-        let resident = Arc::new(Resident {
-            engine,
-            turn: Arc::new(Mutex::new(())),
-            bus,
-            canceller,
-            session_id: std::sync::Mutex::new(session_id),
-            ws_key: std::sync::Mutex::new(key.clone()),
-            path,
-            worktree_stack: std::sync::Mutex::new(Vec::new()),
-            heartbeats,
-            hb_counter: std::sync::atomic::AtomicU64::new(1),
-            notice_inbox,
-            client,
-            stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        });
-        self.registry
-            .lock()
-            .await
-            .insert(key, ResidentSlot::Ready(resident.clone()));
-        tokio::spawn(heartbeat_loop(resident.clone()));
-        self.attach(id, resident, false);
     }
 
     /// Points this connection at a resident: from here on it receives that
@@ -1102,6 +1041,25 @@ impl Handler {
             Some((out, id)),
             None,
         ));
+    }
+
+    /// Steering: text for the model at the running turn's next boundary (the
+    /// notice inbox every turn drains), or at the start of the next turn.
+    fn steer(&mut self, id: u64, params: serde_json::Value) {
+        let Some(st) = &self.state else {
+            self.reply(id, Err(RpcError::internal("no session")));
+            return;
+        };
+        let Some(text) = params["text"].as_str().filter(|t| !t.trim().is_empty()) else {
+            self.reply(id, Err(RpcError::internal("text required")));
+            return;
+        };
+        st.notice_inbox
+            .lock()
+            .expect("notice inbox")
+            .push(format!("[steer from the user]\n{text}"));
+        let running = st.turn.try_lock().is_err();
+        self.reply(id, Ok(serde_json::json!({"queued": true, "turnRunning": running})));
     }
 
     /// Heartbeat/one-shot delivery: fire a prompt with no RPC reply pending.
@@ -1547,6 +1505,169 @@ impl Handler {
 
 /// One prompt's full lifecycle: the turn, then any goal/autonomous
 /// continuations. Only client-initiated turns carry an RPC reply id.
+/// Build a resident around an opened session: engine, gate, agent bus and
+/// schedules. Shared by a client's `session/open` and by startup restore. The
+/// caller registers it and starts its `heartbeat_loop`. Returns how many tool
+/// calls the journal repair had to close.
+async fn build_resident(
+    ws: Workspace,
+    session: SessionManager,
+    env_name: Option<String>,
+) -> Result<(Arc<Resident>, usize), String> {
+    let key = ws.session_key();
+    let session_id = session.header.id.clone();
+    let path = session
+        .path
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    let repaired_tool_calls = session.repaired_tool_calls;
+
+    let factory = provider_factory();
+    let model = default_model_for(&provider_name());
+    let mut tools = hasp_tools::builtins_for(ws.root());
+    tools.extend(hasp_mcp::tools_for(&ws).await);
+    // `--env`: this session's tools run in a named environment. It is
+    // the resident's for its lifetime; a later client attaching joins it.
+    if let Some(name) = &env_name {
+        match hasp_env::Environment::open(name, ws.root()).await {
+            Ok(env) => tools = hasp_env::with_environment(tools, &env),
+            Err(e) => return Err(format!("{e:#}")),
+        }
+    }
+    // The resident's output slot: turn updates and approval questions reach
+    // whichever client is attached, or nobody when the session is detached.
+    let client = SharedClient::default();
+    let mut engine = match (factory)().map_err(|e| e.to_string()).and_then(|provider| {
+        Engine::new(
+            ws.clone(),
+            session,
+            provider,
+            tools,
+            Box::new(WireGate::new(
+                GateCore::new(yolo_from_env(), true),
+                client.clone(),
+            )),
+            model.clone(),
+            hasp_provider::max_output_for(&model),
+        )
+        .map_err(|e| e.to_string())
+    }) {
+        Ok(e) => e,
+        Err(e) => return Err(e),
+    };
+    // Agent bus: child approvals and child-exit notices reach whichever
+    // client is attached, and simply go nowhere when none is.
+    let child_client = client.clone();
+    let gate_factory: hasp_bus::GateFactory = Arc::new(move || {
+        Box::new(WireGate::new(
+            GateCore::new(yolo_from_env(), true),
+            child_client.clone(),
+        )) as Box<dyn Gate>
+    });
+    let fanout_client = client.clone();
+    let fanout: hasp_bus::NoticeFanout = Arc::new(move |note: &str| {
+        fanout_client.update("note", note);
+    });
+    let bus = Arc::new(
+        hasp_bus::LocalBus::new(
+            ws.clone(),
+            model.clone(),
+            hasp_provider::max_output_for(&model),
+            factory,
+            gate_factory,
+            engine.notice_inbox(),
+            Some(fanout),
+        )
+        .with_environment(env_name),
+    );
+    engine.set_bus(bus.clone());
+    let notice_inbox = engine.notice_inbox();
+    // Re-arm heartbeats journaled in this session (they outlive clients).
+    let journaled = engine.session.heartbeats();
+    let engine = Arc::new(Mutex::new(engine));
+    let canceller = engine.lock().await.canceller();
+    let mut hbs = std::collections::HashMap::new();
+    let now = hasp_core::session::now_ms();
+    let mut expired = Vec::new();
+    for hb in &journaled {
+        // A hand-edited journal could hold an unparsable expression; it
+        // would be wrong to refuse every restart over it, so it just never
+        // fires.
+        let cron = hb
+            .cron
+            .as_deref()
+            .and_then(|e| hasp_core::cron::parse(e).ok());
+        // Intervals and cron restart from now (missed runs skipped); a
+        // one-shot keeps its own due time, or expires if that passed while
+        // nothing was running it (residents.rs has the rules).
+        let next_due_ms = match crate::residents::plan_schedule(hb, cron.as_ref(), now) {
+            crate::residents::Arm::At(t) => t,
+            crate::residents::Arm::Expired { due_ms } => {
+                expired.push((hb.id.clone(), due_ms));
+                continue;
+            }
+        };
+        hbs.insert(
+            hb.id.clone(),
+            HbRuntime {
+                instruction: hb.instruction.clone(),
+                mode: hb.mode.clone(),
+                every_ms: hb.every_ms,
+                cron,
+                paused: hb.paused,
+                failures: 0,
+                next_due_ms,
+            },
+        );
+    }
+    if !expired.is_empty() {
+        let mut eng = engine.lock().await;
+        for (hb_id, due_ms) in &expired {
+            eng.session.append_heartbeat("expired", hb_id, None, None, None, "", "");
+            eng.notice_inbox().lock().expect("notice inbox").push(format!(
+                "[scheduler] one-shot {hb_id} was due at {due_ms} (ms) while the daemon was down; \
+                 it was not run late"
+            ));
+        }
+    }
+    let heartbeats = Arc::new(Mutex::new(hbs));
+    // New schedules continue the journal's numbering: a reopened session must
+    // not hand out `hb-1` again while the journal already has an `hb-1`.
+    let next_hb_number = {
+        let eng = engine.lock().await;
+        eng.session
+            .entries()
+            .iter()
+            .filter_map(|e| match e {
+                hasp_core::session::Entry::Heartbeat { hb_id, .. } => {
+                    hb_id.strip_prefix("hb-").and_then(|n| n.parse::<u64>().ok())
+                }
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0)
+            + 1
+    };
+    let resident = Arc::new(Resident {
+        engine,
+        turn: Arc::new(Mutex::new(())),
+        bus,
+        canceller,
+        session_id: std::sync::Mutex::new(session_id),
+        ws_key: std::sync::Mutex::new(key.clone()),
+        path,
+        worktree_stack: std::sync::Mutex::new(Vec::new()),
+        heartbeats,
+        hb_counter: std::sync::atomic::AtomicU64::new(next_hb_number),
+        notice_inbox,
+        client,
+        stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    });
+    Ok((resident, repaired_tool_calls))
+}
+
+
 async fn run_turn_loop(
     resident: Arc<Resident>,
     prompt: String,
@@ -1640,6 +1761,17 @@ async fn heartbeat_loop(resident: Arc<Resident>) {
             }
             for id in &fired_one_shots {
                 hbs.remove(id);
+            }
+        }
+        if !fired_one_shots.is_empty() {
+            // Journaled before the turn starts: if the daemon dies mid-turn, a
+            // restart sees it fired and doesn't run it again.
+            let mut eng = resident.engine.lock().await;
+            for id in &fired_one_shots {
+                eng.session.append_heartbeat("fired", id, None, None, None, "", "");
+            }
+            if eng.session.fault().is_some() {
+                return; // the journal can't record it: run nothing (engine reports the fault)
             }
         }
         for (id, instruction, mode) in due {

@@ -42,6 +42,10 @@ impl Mode {
 pub struct Policy {
     pub mode: Mode,
     pub writable: Vec<PathBuf>,
+    /// Never writable, even when inside a `writable` path. In `read-only` mode
+    /// this is the workspace: a workspace that lives under a temp directory
+    /// (CI, review probes) would otherwise inherit the temp dir's write access.
+    pub read_only: Vec<PathBuf>,
     pub network: bool,
 }
 
@@ -66,9 +70,15 @@ impl Policy {
             }
         }
         let network = hasp_workspace::env_var("HASP_SANDBOX_NETWORK").as_deref() != Ok("deny");
+        let read_only = if mode == Mode::ReadOnly {
+            vec![canonical(root)]
+        } else {
+            Vec::new()
+        };
         Ok(Self {
             mode,
             writable,
+            read_only,
             network,
         })
     }
@@ -142,6 +152,10 @@ pub fn seatbelt_profile(policy: &Policy) -> String {
     for w in &policy.writable {
         profile.push_str(&format!("(allow file-write* (subpath {}))\n", sb_quote(w)));
     }
+    // Seatbelt applies the last matching rule, so these override the allows above.
+    for r in &policy.read_only {
+        profile.push_str(&format!("(deny file-write* (subpath {}))\n", sb_quote(r)));
+    }
     if !policy.network {
         profile.push_str("(deny network*)\n(allow network* (remote unix-socket))\n");
     }
@@ -180,6 +194,12 @@ fn platform_wrap(cmd: &str, policy: &Policy) -> tokio::process::Command {
             c.arg("--bind").arg(w).arg(w);
         }
     }
+    // Later mounts shadow earlier ones: re-mount these read-only on top.
+    for r in &policy.read_only {
+        if r.exists() {
+            c.arg("--ro-bind").arg(r).arg(r);
+        }
+    }
     if !policy.network {
         c.arg("--unshare-net");
     }
@@ -207,6 +227,11 @@ mod tests {
         Policy {
             mode,
             writable,
+            read_only: if mode == Mode::ReadOnly {
+                vec![root.to_path_buf()]
+            } else {
+                Vec::new()
+            },
             network: true,
         }
     }
@@ -216,11 +241,16 @@ mod tests {
         let p = seatbelt_profile(&Policy {
             mode: Mode::WorkspaceWrite,
             writable: vec![PathBuf::from("/work/a \"b\"")],
+            read_only: vec![PathBuf::from("/work/a \"b\"/ro")],
             network: false,
         });
         assert!(p.contains("(deny file-write*)"));
         assert!(p.contains(r#"(subpath "/work/a \"b\"")"#), "{p}");
         assert!(p.contains("(deny network*)"));
+        // the read-only carve-out comes after (and so overrides) the allow
+        let allow = p.find(r#"(allow file-write* (subpath "/work/a \"b\"")"#).unwrap();
+        let deny = p.find(r#"(deny file-write* (subpath "/work/a \"b\"/ro")"#).unwrap();
+        assert!(deny > allow, "{p}");
     }
 
     /// Runs the real platform sandbox when it is installed; skipped (not
@@ -268,5 +298,41 @@ mod tests {
             !root.join("ro.txt").exists(),
             "read-only blocks workspace writes"
         );
+    }
+
+    /// Regression: a workspace inside a temp dir (writable in every mode) must
+    /// still be read-only under `read-only` (a review probe wrote probe.txt).
+    #[tokio::test]
+    async fn read_only_blocks_workspace_inside_temp_dir() {
+        let tool = if cfg!(target_os = "macos") {
+            "sandbox-exec"
+        } else {
+            "bwrap"
+        };
+        if which(tool).is_none() {
+            eprintln!("skipping: {tool} not installed");
+            return;
+        }
+        let ws = tempfile::tempdir().unwrap(); // under TMPDIR / /tmp
+        let root = canonical(ws.path());
+        let out = wrap(
+            "python3 -c \"open('probe.txt','w').write('x')\" ; echo x > also.txt",
+            &policy(Mode::ReadOnly, &root),
+        )
+        .current_dir(&root)
+        .output()
+        .await
+        .unwrap();
+        assert!(!root.join("probe.txt").exists(), "{out:?}");
+        assert!(!root.join("also.txt").exists(), "{out:?}");
+        // temp writes outside the workspace still work (compilers need them)
+        let scratch = tempfile::tempdir().unwrap();
+        let f = canonical(scratch.path()).join("t.txt");
+        let ok = wrap(&format!("echo y > '{}'", f.display()), &policy(Mode::ReadOnly, &root))
+            .current_dir(&root)
+            .output()
+            .await
+            .unwrap();
+        assert!(ok.status.success() && f.exists(), "{ok:?}");
     }
 }

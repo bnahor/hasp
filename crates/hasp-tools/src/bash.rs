@@ -21,11 +21,135 @@ const TAIL_BYTES: usize = 10 * 1024;
 
 /// Read-only commands auto-allowed before any approval. `find` is excluded:
 /// `-exec`/`-delete` make it an execution tool, not a read tool.
+/// Commands the gate may run without asking, *when* `read_only_invocation`
+/// also accepts the arguments. Interpreters and build tools (python3, node,
+/// make, cargo, pytest...) are deliberately absent: `python3 -c ...` or a
+/// build script can write anything, so they need an approval or an explicit
+/// `bash.allow` entry in ~/.hasp/policy.json.
 pub fn seed_allowlist() -> Vec<&'static str> {
     vec![
-        "ls", "cat", "head", "tail", "wc", "rg", "grep", "pwd", "diff", "which", "git", "cargo",
-        "make", "node", "python3", "pytest",
+        "cat", "diff", "git", "grep", "head", "ls", "pwd", "rg", "tail", "wc", "which",
     ]
+}
+
+/// Split a simple command line into words the way a POSIX shell would for the
+/// quoting we allow (single quotes, double quotes, backslash). `None` when the
+/// quoting is unbalanced: anything we can't parse is not read-only.
+pub fn split_words(cmd: &str) -> Option<Vec<String>> {
+    let mut words = Vec::new();
+    let mut cur = String::new();
+    let mut in_word = false;
+    let mut chars = cmd.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' => {
+                in_word = true;
+                loop {
+                    match chars.next()? {
+                        '\'' => break,
+                        ch => cur.push(ch),
+                    }
+                }
+            }
+            '"' => {
+                in_word = true;
+                loop {
+                    match chars.next()? {
+                        '"' => break,
+                        '\\' => cur.push(chars.next()?),
+                        ch => cur.push(ch),
+                    }
+                }
+            }
+            '\\' => {
+                in_word = true;
+                cur.push(chars.next()?);
+            }
+            ' ' => {
+                if in_word {
+                    words.push(std::mem::take(&mut cur));
+                    in_word = false;
+                }
+            }
+            ch => {
+                in_word = true;
+                cur.push(ch);
+            }
+        }
+    }
+    if in_word {
+        words.push(cur);
+    }
+    Some(words)
+}
+
+/// git subcommands that only read the repository.
+const GIT_READ: &[&str] = &[
+    "blame", "branch", "describe", "diff", "log", "ls-files", "remote", "rev-parse", "shortlog",
+    "show", "status",
+];
+
+/// Flags that make an otherwise read-only tool write files or run programs.
+fn forbidden_flag(tool: &str, arg: &str) -> bool {
+    let starts = |p: &str| arg == p || arg.starts_with(&format!("{p}="));
+    match tool {
+        // --pre / --hostname-bin run arbitrary programs; -z runs decompressors.
+        "rg" => starts("--pre") || starts("--pre-glob") || starts("--hostname-bin")
+            || arg == "-z" || arg == "--search-zip",
+        "git" => {
+            starts("--output") || starts("--ext-diff") || arg == "--textconv"
+                || starts("--exec") || starts("--upload-pack") || starts("--receive-pack")
+                || starts("--config") || starts("--open-files-in-pager") || arg == "-c"
+                || arg.starts_with("-O") || starts("--git-dir") || starts("--work-tree")
+                || starts("--exec-path") || starts("--paginate")
+        }
+        _ => false,
+    }
+}
+
+/// Whether `cmd` is a simple invocation of a read-only tool with arguments
+/// that keep it read-only: the narrow set the gate runs without asking.
+/// Structural checks (`is_simple`, `escapes_cwd`) and the OS sandbox still
+/// apply on top; this only decides "no prompt needed".
+pub fn read_only_invocation(cmd: &str) -> bool {
+    if !is_simple(cmd) {
+        return false;
+    }
+    let Some(words) = split_words(cmd) else {
+        return false;
+    };
+    let Some((tool, args)) = words.split_first() else {
+        return false;
+    };
+    if !seed_allowlist().contains(&tool.as_str()) {
+        return false;
+    }
+    if args.iter().any(|a| forbidden_flag(tool, a)) {
+        return false;
+    }
+    if tool == "git" {
+        // No global options before the subcommand (-c, -C, --git-dir ... all
+        // change what runs or where), and only reading subcommands.
+        let Some(sub) = args.first() else {
+            return false;
+        };
+        if !GIT_READ.contains(&sub.as_str()) {
+            return false;
+        }
+        let rest = &args[1..];
+        return match sub.as_str() {
+            // listing only: no names (which would create/rename/delete)
+            "branch" => rest.iter().all(|a| {
+                matches!(
+                    a.as_str(),
+                    "-a" | "-r" | "-v" | "-vv" | "--list" | "--all" | "--remotes" | "--show-current"
+                )
+            }),
+            "remote" => rest.iter().all(|a| a == "-v"),
+            _ => true,
+        };
+    }
+    true
 }
 
 pub fn is_simple(cmd: &str) -> bool {
@@ -272,6 +396,63 @@ mod tests {
         assert!(escapes_cwd("cat ~/secret"));
         assert!(escapes_cwd("cat ../outside"));
         assert!(!escapes_cwd("rg pattern src"));
+    }
+
+    #[test]
+    fn read_only_invocations_are_narrow() {
+        for ok in [
+            "ls -la src",
+            "cat README.md",
+            "rg -n 'fn main' crates",
+            "grep -rn TODO src",
+            "git status",
+            "git log --oneline -5",
+            "git diff HEAD~1 -- src",
+            "git branch -a",
+            "git remote -v",
+            "wc -l \"a file.txt\"",
+        ] {
+            assert!(read_only_invocation(ok), "{ok}");
+        }
+        for bad in [
+            // the review probe: an interpreter is not read-only
+            "python3 -c \"open('probe.txt','w').write('harmless')\"",
+            "node -e \"require('fs').writeFileSync('x','y')\"",
+            "cargo build",
+            "make",
+            "pytest",
+            "sh -c 'echo hi'",
+            // read-only tools turned into writers or launchers
+            "rg --pre ./evil.sh pattern",
+            "rg --pre=./evil.sh pattern",
+            "rg --hostname-bin ./evil.sh x",
+            "git log --output=owned.txt",
+            "git diff --ext-diff",
+            "git -c core.pager=./evil log",
+            "git -C other status",
+            "git commit -m x",
+            "git push",
+            "git checkout -- .",
+            "git branch new-branch",
+            "git branch -D main",
+            "git remote add x y",
+            // unparseable or shell features
+            "cat 'unterminated",
+            "cat a > b",
+            "ls; rm -rf x",
+            "",
+        ] {
+            assert!(!read_only_invocation(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn splits_like_a_shell() {
+        assert_eq!(
+            split_words(r#"a 'b c' "d \"e\"" f\ g"#).unwrap(),
+            vec!["a", "b c", "d \"e\"", "f g"]
+        );
+        assert!(split_words("a 'b").is_none());
     }
 
     #[tokio::test]

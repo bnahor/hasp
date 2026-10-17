@@ -9,6 +9,7 @@ name = "hasp"
 path = "src/main.rs"
 
 [dependencies]
+hasp-recall = { workspace = true }
 hasp-agents = { workspace = true }
 hasp-bus = { workspace = true }
 hasp-core = { workspace = true }

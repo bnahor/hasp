@@ -52,9 +52,10 @@ pub fn assemble_with(
     idle_prune: bool,
 ) -> AssembledContext {
     let mut system = BASE_SYSTEM_PROMPT.replace("{ROOT}", &sess.identity().root.to_string_lossy());
-    if let Some(instructions) = load_instructions(&sess.identity().root) {
+    let root = sess.identity().root.clone();
+    if let Some(instructions) = sess.instructions_with(|| load_instructions(&root)) {
         system.push_str("\n\n# Project instructions\n\n");
-        system.push_str(&instructions);
+        system.push_str(instructions);
     }
     let mut messages = sess.context_messages();
     if idle_prune {
@@ -115,7 +116,28 @@ pub fn prune_stale(messages: &mut [AgentMessage]) {
 /// Fixed discovery chain: parent directory then root, each contributing the
 /// first of AGENTS.md / HASP.md / HARNESS.md (pre-rename) / CLAUDE.md. Ancestors first (general →
 /// specific), byte-stable within a session.
+/// Project instructions plus the user's active memories for this workspace:
+/// the part of the prompt a session snapshots once (see `SessionManager`).
 fn load_instructions(root: &Path) -> Option<String> {
+    let files = load_instruction_files(root);
+    let memory = hasp_workspace::hasp_home().ok().and_then(|home| {
+        hasp_recall::MemoryStore::open(&hasp_recall::memory::default_path(&home))
+            .ok()
+            .and_then(|m| m.prompt_section(&root.to_string_lossy()))
+    });
+    match (files, memory) {
+        (None, None) => None,
+        (f, m) => Some(
+            [f, m.map(|m| format!("## Memory\n\n{m}"))]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+        ),
+    }
+}
+
+fn load_instruction_files(root: &Path) -> Option<String> {
     let mut dirs: Vec<&Path> = vec![root];
     if let Some(parent) = root.parent() {
         dirs.insert(0, parent);
@@ -143,6 +165,22 @@ mod tests {
     use super::*;
     use crate::session::SessionManager;
     use hasp_workspace::Workspace;
+
+    #[test]
+    fn instructions_are_snapshotted_per_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("AGENTS.md"), "rule one").unwrap();
+        let ws = Workspace::resolve(tmp.path()).unwrap();
+        let mut sess = SessionManager::in_memory(&ws);
+        let first = assemble(&sess, &[]).system;
+        assert!(first.contains("rule one"));
+        // edited mid-session: the prompt (and the provider cache) stays put
+        std::fs::write(tmp.path().join("AGENTS.md"), "rule two").unwrap();
+        assert_eq!(assemble(&sess, &[]).system, first);
+        // until the session deliberately reloads
+        sess.reload_instructions();
+        assert!(assemble(&sess, &[]).system.contains("rule two"));
+    }
 
     #[test]
     fn system_prompt_is_stable_across_calls_and_contains_root() {

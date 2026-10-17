@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+serde_json = { workspace = true }
 hasp-core = { workspace = true }
 hasp-env = { workspace = true }
 hasp-tools = { workspace = true }

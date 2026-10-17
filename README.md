@@ -306,16 +306,28 @@ edits diffs in milliseconds instead of four seconds; nothing is ever
 sandbox (`sandbox-exec` on macOS, `bwrap` on Linux), so it can write only to
 the workspace, the temp directories and `HASP_SANDBOX_WRITABLE`
 (colon-separated). `read-only` allows temp writes only, and
-`HASP_SANDBOX_NETWORK=deny` also cuts the network. If the platform tool is
-missing, commands are refused with a message rather than run unsandboxed.
+`HASP_SANDBOX_NETWORK=deny` also cuts the network. Under `read-only` the
+workspace itself stays read-only even when it lives inside a temp directory.
+If the platform tool is missing, commands are refused with a message rather
+than run unsandboxed.
 Approvals still apply on top. The sandbox limits what an approved command can
 do, and it is what makes a long `--yolo` run reasonable.
+
+Without a prompt, the gate runs only commands it can prove read-only: `ls`,
+`cat`, `head`, `tail`, `wc`, `pwd`, `diff`, `which`, `grep`, `rg` (not `--pre`)
+and reading `git` subcommands (no `-c`, `--output`, `--ext-diff`). Interpreters
+and build tools (`python3`, `node`, `make`, `cargo`, `pytest`) always ask, or
+are allowed by name in `~/.hasp/policy.json`:
+`{"bash": {"allow": ["cargo test", "make check"]}}` (word prefixes; the
+metacharacter and path rules and the sandbox still apply).
 
 ## Agent bus
 
 The model can spawn child agents with the `spawn` tool. Children get base tools
 only (read/write/edit/bash, plus the read-only `web_fetch` and `symbol_search`) — one level deep, by construction — and a child that
-declares `mutation: true` runs in its own git worktree (`hasp/<name>`).
+declares `mutation: true` runs in its own git worktree (`hasp/<name>`). A child
+without `mutation` shares your checkout read-only: no `write`/`edit`/`job`, and
+`bash` limited to provably read-only commands under its own gate (it never asks).
 Children never block the parent: exits arrive as notices between tool calls, and
 `message` supports follow-ups with `delivered`/`queued` receipts.
 
@@ -392,6 +404,12 @@ with `{"servers": {"hasp": {"command": "…/hasp", "args": ["--mcp-serve"],
   (messages, compactions, goals, heartbeats, model changes), written, never
   mutated. `record` entries are the canonical state; restarting resumes the tail.
 - `~/.hasp/credentials.json` — API keys, mode 0600.
+- `~/.hasp/residents.json` — sessions the daemon restores at start
+  (`hasp resident enable|disable|list`).
+- `~/.hasp/recall/index.db` — full-text index over the journals; node-local,
+  disposable (`hasp recall rebuild`).
+- `~/.hasp/memory/memory.jsonl`, `~/.hasp/workflows/` — curated memory and
+  workflow drafts (`hasp memory …`, `hasp workflow …`). See docs/edge-agent.md.
 - `<project>/.hasp/artifacts/<run>/` — truncated tool output that the model can
   page back in with `read`.
 - `<project>/.hasp/traces/*.jsonl` — per-turn API and tool timings.

@@ -12,6 +12,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::{AgentMessage, ContentBlock, Usage, estimate_tokens};
 
+/// `HASP_JOURNAL_FSYNC=0` skips the per-append fsync (tests, slow disks).
+fn journal_fsync() -> bool {
+    std::env::var("HASP_JOURNAL_FSYNC").as_deref() != Ok("0")
+}
+
 pub fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -184,6 +189,9 @@ pub struct HeartbeatState {
     /// Five-field cron expression, for wall-clock schedules.
     pub cron: Option<String>,
     pub paused: bool,
+    /// When it was (last) added: a one-shot is due at `set_ms + in_ms`.
+    #[serde(default)]
+    pub set_ms: i64,
 }
 
 pub struct SessionManager {
@@ -196,6 +204,29 @@ pub struct SessionManager {
     /// Tool calls closed with an "interrupted" result when this session was
     /// opened — non-zero means the previous run was killed mid-tool.
     pub repaired_tool_calls: usize,
+    /// Set when an append could not be made durable. The journal is canonical,
+    /// so from then on nothing more is appended (in memory or on disk) and the
+    /// engine stops before any further side effect: history must never claim
+    /// less, or more, than what happened. Latched until the session is reopened.
+    fault: Option<String>,
+    /// Bytes of a torn final record found (and set aside) when opening.
+    pub recovered_tail: Option<TornTail>,
+    /// Test hook: appends left before writes start failing (`fail_appends_after`).
+    fail_after: Option<usize>,
+    /// Project instructions (AGENTS.md ...) as first read for this session. The
+    /// system prompt must stay byte-stable within a session (prompt-cache
+    /// contract), so an edit to AGENTS.md mid-session doesn't leak into the
+    /// next request; `reload_instructions` adopts it deliberately.
+    instructions: std::sync::OnceLock<Option<String>>,
+}
+
+/// A final journal line cut off mid-write (crash, full disk). Valid entries
+/// before it are kept untouched; the partial bytes move to `sidecar`.
+#[derive(Debug, Clone)]
+pub struct TornTail {
+    pub offset: u64,
+    pub bytes: usize,
+    pub sidecar: PathBuf,
 }
 
 impl SessionManager {
@@ -217,6 +248,10 @@ impl SessionManager {
             index: HashMap::new(),
             leaf: None,
             repaired_tool_calls: 0,
+            fault: None,
+            recovered_tail: None,
+            fail_after: None,
+            instructions: Default::default(),
         }
     }
 
@@ -250,6 +285,10 @@ impl SessionManager {
             index: HashMap::new(),
             leaf: None,
             repaired_tool_calls: 0,
+            fault: None,
+            recovered_tail: None,
+            fail_after: None,
+            instructions: Default::default(),
         })
     }
 
@@ -297,8 +336,37 @@ impl SessionManager {
         Ok(Some(session))
     }
 
+    /// Open a journal. Every complete line must parse: corruption in the
+    /// middle is an error, never skipped. The one recoverable case is a torn
+    /// *final* record (no trailing newline and not valid JSON: a crash or full
+    /// disk mid-append). Its bytes are moved to `<file>.torn-<offset>`, the file
+    /// is truncated back to the last complete entry, and `recovered_tail` says
+    /// so. Complete entries are never rewritten.
     pub fn open(path: &Path) -> std::io::Result<Self> {
-        let raw = std::fs::read_to_string(path)?;
+        let bytes = std::fs::read(path)?;
+        let mut raw = String::from_utf8_lossy(&bytes).into_owned();
+        let mut recovered_tail = None;
+        if !raw.is_empty() && !raw.ends_with('\n') {
+            let start = raw.rfind('\n').map_or(0, |i| i + 1);
+            let tail = &raw[start..];
+            if start > 0 && serde_json::from_str::<Entry>(tail).is_err() {
+                let offset = start as u64;
+                let sidecar = path.with_file_name(format!(
+                    "{}.torn-{offset}",
+                    path.file_name().unwrap_or_default().to_string_lossy()
+                ));
+                std::fs::write(&sidecar, &bytes[start..])?;
+                let f = std::fs::OpenOptions::new().write(true).open(path)?;
+                f.set_len(offset)?;
+                f.sync_all()?;
+                recovered_tail = Some(TornTail {
+                    offset,
+                    bytes: bytes.len() - start,
+                    sidecar,
+                });
+                raw.truncate(start);
+            }
+        }
         let mut lines = raw.lines();
         let header: SessionHeader = serde_json::from_str(
             lines
@@ -309,17 +377,28 @@ impl SessionManager {
         let mut entries = Vec::new();
         let mut index = HashMap::new();
         let mut leaf = None;
-        for line in lines {
+        for (n, line) in lines.enumerate() {
             if line.trim().is_empty() {
                 continue;
             }
-            let entry: Entry = serde_json::from_str(line)
-                .map_err(|e| std::io::Error::other(format!("bad session entry: {e}")))?;
+            let entry: Entry = serde_json::from_str(line).map_err(|e| {
+                std::io::Error::other(format!(
+                    "bad session entry on line {} of {}: {e} (mid-file corruption is not repaired automatically)",
+                    n + 2,
+                    path.display()
+                ))
+            })?;
             index.insert(entry.id().to_string(), entries.len());
             leaf = Some(entry.id().to_string());
             entries.push(entry);
         }
-        let file = std::fs::OpenOptions::new().append(true).open(path)?;
+        let mut file = std::fs::OpenOptions::new().append(true).open(path)?;
+        if !raw.is_empty() && !raw.ends_with('\n') {
+            // A complete last entry that lost only its newline: terminate it so
+            // the next append starts on its own line.
+            file.write_all(b"\n")?;
+            file.sync_data()?;
+        }
         let mut session = Self {
             file: Some(file),
             path: Some(path.to_path_buf()),
@@ -328,6 +407,10 @@ impl SessionManager {
             index,
             leaf,
             repaired_tool_calls: 0,
+            fault: None,
+            recovered_tail,
+            fail_after: None,
+            instructions: Default::default(),
         };
         session.repaired_tool_calls = session.repair_dangling_tool_calls();
         Ok(session)
@@ -558,6 +641,7 @@ impl SessionManager {
                 cron,
                 instruction,
                 mode,
+                ts,
                 ..
             } = e
             else {
@@ -573,6 +657,7 @@ impl SessionManager {
                         in_ms: *in_ms,
                         cron: cron.clone(),
                         paused: false,
+                        set_ms: *ts,
                     };
                     match out.iter_mut().find(|h| h.id == *hb_id) {
                         Some(slot) => *slot = hb,
@@ -587,7 +672,10 @@ impl SessionManager {
                     .iter_mut()
                     .filter(|h| h.id == *hb_id)
                     .for_each(|h| h.paused = false),
-                "clear" => out.retain(|h| h.id != *hb_id),
+                // "fired": a one-shot was handed to the engine (journaled before
+                // it runs, so a restart never fires it twice). "expired": its
+                // time passed while the daemon was down, so it was dropped.
+                "clear" | "fired" | "expired" => out.retain(|h| h.id != *hb_id),
                 _ => {}
             }
         }
@@ -660,6 +748,10 @@ impl SessionManager {
             index,
             leaf: self.leaf.clone(),
             repaired_tool_calls: 0,
+            fault: None,
+            recovered_tail: None,
+            fail_after: None,
+            instructions: Default::default(),
         })
     }
 
@@ -691,19 +783,78 @@ impl SessionManager {
         }
     }
 
+    /// The instruction snapshot for this session, loading it on first use.
+    pub fn instructions_with(&self, load: impl FnOnce() -> Option<String>) -> Option<&str> {
+        self.instructions.get_or_init(load).as_deref()
+    }
+
+    /// Drop the snapshot: the next request re-reads AGENTS.md (one deliberate
+    /// prompt-cache break, e.g. after the user edited the instructions).
+    pub fn reload_instructions(&mut self) {
+        self.instructions = std::sync::OnceLock::new();
+    }
+
+    /// Why the journal stopped accepting entries, if it did.
+    pub fn fault(&self) -> Option<&str> {
+        self.fault.as_deref()
+    }
+
+    /// `Err` once an append has failed: callers about to cause a side effect
+    /// (a model request, a tool run) must check this first.
+    pub fn ensure_durable(&self) -> std::io::Result<()> {
+        match &self.fault {
+            Some(f) => Err(std::io::Error::other(format!("session journal is not durable: {f}"))),
+            None => Ok(()),
+        }
+    }
+
+    /// Append one entry. It joins the in-memory history only after the whole
+    /// line is written and synced; on failure the session faults instead
+    /// (see `fault`) and a partially written line is cut off again.
     fn write(&mut self, entry: Entry) {
+        if self.fault.is_some() {
+            return;
+        }
         let id = entry.id().to_string();
         if let Some(f) = &mut self.file {
-            let _ = writeln!(
-                f,
-                "{}",
-                serde_json::to_string(&entry).expect("entry serializes")
-            );
-            let _ = f.flush();
+            let mut line = serde_json::to_string(&entry).expect("entry serializes");
+            line.push('\n');
+            let before = f.metadata().map(|m| m.len()).ok();
+            let injected = match &mut self.fail_after {
+                Some(0) => true,
+                Some(n) => {
+                    *n -= 1;
+                    false
+                }
+                None => false,
+            };
+            let res = if injected {
+                // a partial write, then the error: what a full disk looks like
+                f.write_all(&line.as_bytes()[..line.len() / 2])
+                    .and_then(|_| Err(std::io::Error::other("injected write failure")))
+            } else {
+                f.write_all(line.as_bytes())
+            }
+                .and_then(|_| f.flush())
+                .and_then(|_| if journal_fsync() { f.sync_data() } else { Ok(()) });
+            if let Err(e) = res {
+                if let Some(len) = before {
+                    let _ = f.set_len(len); // don't leave half a record behind
+                }
+                self.fault = Some(format!("append failed: {e}"));
+                return;
+            }
         }
         self.index.insert(id.clone(), self.entries.len());
         self.entries.push(entry);
         self.leaf = Some(id);
+    }
+
+    /// Test hook: let `n` more appends succeed, then fail every write (after
+    /// writing half a line, like a full disk).
+    #[doc(hidden)]
+    pub fn fail_appends_after(&mut self, n: usize) {
+        self.fail_after = Some(n);
     }
 
     /// Path from root to the active leaf, root-first.

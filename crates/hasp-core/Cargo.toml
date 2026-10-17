@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+hasp-recall = { workspace = true }
 futures-util.workspace = true
 regex = "1"
 base64 = "0.22"

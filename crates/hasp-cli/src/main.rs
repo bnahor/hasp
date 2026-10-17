@@ -21,6 +21,8 @@ mod gate;
 mod highlight;
 mod markdown;
 mod mcp_server;
+mod recall_cmd;
+mod residents;
 mod review_cmd;
 mod theme;
 mod tui;
@@ -302,6 +304,18 @@ async fn main() -> Result<()> {
                 Some(other) => bail!("unknown worktrees subcommand: {other}"),
             }
             return Ok(());
+        }
+        Some(cmd @ ("recall" | "memory" | "workflow")) => {
+            let rest: Vec<String> = std::env::args().skip(2).collect();
+            return match cmd {
+                "recall" => recall_cmd::recall(&rest),
+                "memory" => recall_cmd::memory(&rest),
+                _ => recall_cmd::workflow(&rest),
+            };
+        }
+        Some("resident") => {
+            let rest: Vec<String> = std::env::args().skip(2).collect();
+            return residents::command(&rest);
         }
         Some("shutdown") => {
             let sock = daemon::socket_path()?;

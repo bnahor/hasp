@@ -6,7 +6,7 @@
 use hasp_core::engine::{Engine, TurnSink};
 use hasp_core::session::SessionManager;
 use hasp_core::{
-    AgentMessage, Bus, ChildInfo, ChildReceipt, ChildStatus, ContentBlock, Gate, Provider, Sink,
+    AgentMessage, Bus, ChildInfo, ChildReceipt, ChildStatus, ContentBlock, Gate, GateDecision, Provider, Sink,
     SpawnHandle, SpawnRequest,
 };
 use hasp_tools::builtins_base;
@@ -154,6 +154,42 @@ impl LocalBus {
     }
 }
 
+/// Tools for a `mutation: false` child: the base set minus everything that
+/// writes (write, edit) or manages processes (job). `bash` stays, limited by
+/// [`ReadOnlyChildGate`] to read-only invocations. Still name-sorted.
+pub fn read_only_child_tools() -> Vec<Box<dyn hasp_core::Tool>> {
+    builtins_base()
+        .into_iter()
+        .filter(|t| !matches!(t.spec().name.as_str(), "write" | "edit" | "job"))
+        .collect()
+}
+
+/// The gate for read-only children (see `spawn_child`).
+pub struct ReadOnlyChildGate;
+
+impl Gate for ReadOnlyChildGate {
+    fn check_bash(&mut self, command: &str) -> GateDecision {
+        if hasp_tools::is_simple(command)
+            && !hasp_tools::escapes_cwd(command)
+            && hasp_tools::read_only_invocation(command)
+        {
+            GateDecision::Allow
+        } else {
+            GateDecision::Deny(
+                "read-only child: only read-only commands (ls, cat, rg, git status/log/diff...) run here; \
+                 spawn with mutation: true to change files"
+                    .into(),
+            )
+        }
+    }
+    fn check_write(&mut self, _: &str) -> GateDecision {
+        GateDecision::Deny("read-only child: no file writes; spawn with mutation: true".into())
+    }
+    fn check_tool(&mut self, name: &str, _: &serde_json::Value) -> GateDecision {
+        GateDecision::Deny(format!("read-only child: {name} not available"))
+    }
+}
+
 impl LocalBus {
     /// Children inherit this environment unless they name another.
     pub fn with_environment(mut self, name: Option<String>) -> Self {
@@ -185,25 +221,37 @@ impl Bus for LocalBus {
         let provider = (self.provider_factory)()?;
         // A child in an environment gets its own instance of it, with its own
         // checkout (the worktree, for a mutation child) mounted inside.
+        let base = if req.mutation {
+            builtins_base()
+        } else {
+            read_only_child_tools()
+        };
         let (tools, environment) = match req.environment.as_ref().or(self.environment.as_ref()) {
             Some(env_name) => {
                 let env = hasp_env::Environment::open(env_name, ws.root())
                     .await
                     .map_err(|e| format!("{e:#}"))?;
                 let label = format!("{env_name} ({})", env.id());
-                (
-                    hasp_env::with_environment(builtins_base(), &env),
-                    Some(label),
-                )
+                (hasp_env::with_environment(base, &env), Some(label))
             }
-            None => (builtins_base(), None),
+            None => (base, None),
+        };
+        // A read-only child shares the parent's checkout, so it gets an
+        // attenuated gate rather than the parent's: it can never write, never
+        // run anything but a provably read-only command, and never asks (an
+        // approval prompt from a child is how a "read-only" helper ends up
+        // editing the tree the parent is working in).
+        let gate: Box<dyn Gate> = if req.mutation {
+            (self.gate_factory)()
+        } else {
+            Box::new(ReadOnlyChildGate)
         };
         let engine = Engine::new(
             ws,
             session,
             provider,
             tools,
-            (self.gate_factory)(),
+            gate,
             self.model.clone(),
             self.max_tokens,
         )

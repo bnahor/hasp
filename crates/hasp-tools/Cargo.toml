@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+hasp-recall = { workspace = true }
 hasp-workspace = { workspace = true }
 hasp-core = { workspace = true }
 hasp-diff = { workspace = true }

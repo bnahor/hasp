@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/hasp-bus",
+    "crates/hasp-recall",
     "crates/hasp-cli",
     "crates/hasp-config",
     "crates/hasp-desktop",
@@ -31,6 +32,7 @@ hasp-diff = { path = "crates/hasp-diff" }
 hasp-env = { path = "crates/hasp-env" }
 hasp-mcp = { path = "crates/hasp-mcp" }
 hasp-provider = { path = "crates/hasp-provider" }
+hasp-recall = { path = "crates/hasp-recall" }
 hasp-review = { path = "crates/hasp-review" }
 hasp-tools = { path = "crates/hasp-tools" }
 hasp-wire = { path = "crates/hasp-wire" }
