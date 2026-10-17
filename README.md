@@ -22,26 +22,26 @@ Rebuild the container guest agent once with `hasp env build-guest`.
 
 ## Install
 
-From a checkout (Rust stable; this is what `hasp update` repeats):
+```sh
+# macOS / Linux — the `hasp` CLI and the `hasp-desktop` native app
+curl -fsSL https://raw.githubusercontent.com/bnahor/hasp/main/install.sh | sh
+
+brew install bnahor/hasp/hasp       # Homebrew (macOS, Linux)
+npm install -g hasp-cli             # npm (fetches the same release binaries)
+```
+
+Prebuilt for macOS (Apple silicon and Intel) and Linux x86_64; every `v*`
+tag publishes them on the [releases page](https://github.com/bnahor/hasp/releases/latest)
+with SHA-256 checksums. On Linux the native app needs the usual GPU and
+windowing libraries (fontconfig, Wayland/X11, Vulkan); `hasp` needs nothing.
+
+From source (Rust stable):
 
 ```sh
-git clone git@github.com:bnahor/hasp.git && cd hasp
+git clone https://github.com/bnahor/hasp && cd hasp
 cargo install --locked --path crates/hasp-cli       # → ~/.cargo/bin/hasp
-cargo install --locked --path crates/hasp-desktop   # → ~/.cargo/bin/hasp-desktop (native app)
+cargo install --locked --path crates/hasp-desktop   # → ~/.cargo/bin/hasp-desktop
 ```
-
-From a release (each `v*` tag builds macOS arm64/x86_64 and Linux x86_64,
-with both binaries in one tarball). The repo is private, so download with
-`gh`, which uses your GitHub login:
-
-```sh
-gh release download -R bnahor/hasp -p "hasp-$(uname -m | sed s/arm64/aarch64/)-apple-darwin.tar.gz"
-tar -xzf hasp-*.tar.gz && install -m 0755 hasp-*/hasp hasp-*/hasp-desktop ~/.local/bin/
-```
-
-or `HASP_REPO=bnahor/hasp sh install.sh` once the repo (or a mirror) is
-public. On Linux the native app needs the usual GPU/windowing libraries
-(fontconfig, Wayland/X11, Vulkan); `hasp` itself needs nothing.
 
 ## Quickstart
 

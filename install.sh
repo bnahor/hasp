@@ -1,17 +1,14 @@
 #!/bin/sh
-# Install a published hasp release.
+# Install the latest hasp release (the `hasp` CLI and the `hasp-desktop` app):
 #
-# Requires a release to exist: set HASP_REPO to the GitHub repository that
-# publishes them (owner/name). Without a release, build from a checkout with
-# `cargo install --path crates/hasp-cli` — that path needs no network.
+#   curl -fsSL https://raw.githubusercontent.com/bnahor/hasp/main/install.sh | sh
+#
+# HASP_REPO picks another repository (owner/name), HASP_BIN_DIR another
+# destination (default ~/.local/bin). From a checkout instead:
+# `cargo install --locked --path crates/hasp-cli`.
 set -eu
 
-REPO="${HASP_REPO:-}"
-if [ -z "$REPO" ]; then
-  echo "install.sh: set HASP_REPO=owner/name (no release channel is published yet)" >&2
-  echo "            or build from a checkout: cargo install --path crates/hasp-cli" >&2
-  exit 1
-fi
+REPO="${HASP_REPO:-bnahor/hasp}"
 
 os=$(uname -s)
 arch=$(uname -m)

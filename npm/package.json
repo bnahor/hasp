@@ -1,0 +1,15 @@
+{
+  "name": "hasp-cli",
+  "version": "0.1.0",
+  "description": "hasp — a coding agent with a TUI, a daemon and a native desktop app. Installs the prebuilt binaries from the GitHub release.",
+  "license": "MIT",
+  "homepage": "https://github.com/bnahor/hasp",
+  "repository": { "type": "git", "url": "git+https://github.com/bnahor/hasp.git" },
+  "keywords": ["agent", "coding-agent", "cli", "tui", "llm"],
+  "bin": { "hasp": "bin/hasp.js", "hasp-desktop": "bin/hasp-desktop.js" },
+  "scripts": { "postinstall": "node install.js" },
+  "os": ["darwin", "linux"],
+  "cpu": ["arm64", "x64"],
+  "engines": { "node": ">=18" },
+  "files": ["bin", "install.js", "run.js", "LICENSE", "README.md"]
+}
