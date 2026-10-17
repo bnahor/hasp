@@ -252,14 +252,26 @@ fn list_projects(keep: &str) -> Result<Value> {
     }
     let projects: Vec<Value> = order
         .into_iter()
-        .filter(|r| Path::new(r).is_dir() && (r == keep || !is_scratch(Path::new(r))))
+        .filter(|r| {
+            // The launch project, and worktrees made from it, stay listed
+            // even where scratch directories are otherwise hidden.
+            let kept = r == keep
+                || worktree_of(Path::new(r)).is_some_and(|(p, _)| p.to_string_lossy() == keep);
+            Path::new(r).is_dir() && (kept || !is_scratch(Path::new(r)))
+        })
         .map(|r| {
             let name = Path::new(&r)
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| r.clone());
             let sessions = groups.remove(&r).unwrap_or_default();
-            json!({"root": r, "name": name, "sessions": sessions})
+            let wt = worktree_of(Path::new(&r));
+            json!({
+                "root": r,
+                "name": name,
+                "sessions": sessions,
+                "parent": wt.as_ref().map(|(p, _)| p.display().to_string()),
+            })
         })
         .collect();
     Ok(json!({"projects": projects}))
@@ -334,14 +346,19 @@ fn transcript(path: &Path) -> Result<Value> {
     for m in s.context_messages() {
         match m {
             AgentMessage::User {
-                content, images, ..
-            } => items.push(json!({"kind": "user", "text": content, "images": images.len()})),
-            AgentMessage::Assistant { content, .. } => {
+                content,
+                images,
+                ts,
+            } => items
+                .push(json!({"kind": "user", "text": content, "images": images.len(), "ts": ts})),
+            AgentMessage::Assistant {
+                content, model, ts, ..
+            } => {
                 for b in content {
                     match b {
-                        ContentBlock::Text { text } if !text.trim().is_empty() => {
-                            items.push(json!({"kind": "assistant", "text": text}))
-                        }
+                        ContentBlock::Text { text } if !text.trim().is_empty() => items.push(
+                            json!({"kind": "assistant", "text": text, "model": model, "ts": ts}),
+                        ),
                         ContentBlock::Thinking { thinking, .. } if !thinking.trim().is_empty() => {
                             items.push(json!({"kind": "thinking", "text": thinking}))
                         }
@@ -361,6 +378,7 @@ fn transcript(path: &Path) -> Result<Value> {
                 tool_name,
                 content,
                 is_error,
+                ts,
                 ..
             } => {
                 let args = calls
@@ -373,6 +391,7 @@ fn transcript(path: &Path) -> Result<Value> {
                     "subject": subject_of(&args),
                     "output": clip(&content, 20_000),
                     "isError": is_error,
+                    "ts": ts,
                 }));
             }
         }
@@ -404,14 +423,104 @@ fn clip(s: &str, max: usize) -> String {
 }
 
 /// The working tree against HEAD, as the review engine diffs it.
+/// A worktree this harness made — `<parent>/.harness/worktrees/<name>` — as
+/// its parent root and name.
+fn worktree_of(root: &Path) -> Option<(PathBuf, String)> {
+    let name = root.file_name()?.to_str()?.to_string();
+    let worktrees = root.parent()?;
+    let dot = worktrees.parent()?;
+    if worktrees.file_name()? != "worktrees" || dot.file_name()? != ".harness" {
+        return None;
+    }
+    Some((dot.parent()?.to_path_buf(), name))
+}
+
+/// Read-only, bounded browsing through the same confinement as agent tools.
+fn browse(root: &Path, rel: &str, preview: bool) -> Result<Value> {
+    use std::io::Read;
+
+    if root.as_os_str().is_empty() || !root.is_dir() {
+        bail!("a workspace directory is required");
+    }
+    let ws = harness_workspace::Workspace::resolve(root)?;
+    let path = ws.confine(rel)?;
+    if preview {
+        const LIMIT: u64 = 256 * 1024;
+        let meta = std::fs::metadata(&path)?;
+        if !meta.is_file() {
+            bail!("only regular files can be previewed");
+        }
+        let mut bytes = Vec::new();
+        std::fs::File::open(&path)?
+            .take(LIMIT + 1)
+            .read_to_end(&mut bytes)?;
+        let truncated = bytes.len() as u64 > LIMIT;
+        bytes.truncate(LIMIT as usize);
+        let text = std::str::from_utf8(&bytes);
+        // A bounded read can split the final UTF-8 character.
+        let binary = bytes.contains(&0)
+            || text
+                .as_ref()
+                .is_err_and(|e| !truncated || e.error_len().is_some());
+        return Ok(json!({
+            "path": rel, "size": meta.len(), "binary": binary, "truncated": truncated,
+            "text": if binary { None } else { Some(String::from_utf8_lossy(&bytes)) },
+        }));
+    }
+    const LIMIT: usize = 5000;
+    let mut entries = Vec::new();
+    let mut truncated = false;
+    for entry in std::fs::read_dir(&path)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if name == ".git" {
+            continue;
+        }
+        if entries.len() == LIMIT {
+            truncated = true;
+            break;
+        }
+        let relative = Path::new(rel).join(name).to_string_lossy().to_string();
+        // Do not follow links outside the workspace, or expose special files.
+        let Ok(confined) = ws.confine(&relative) else {
+            continue;
+        };
+        let Ok(meta) = std::fs::metadata(confined) else {
+            continue;
+        };
+        if !meta.is_file() && !meta.is_dir() {
+            continue;
+        }
+        entries.push(json!({"name": name, "path": relative, "directory": meta.is_dir()}));
+    }
+    entries.sort_by(|a, b| {
+        b["directory"]
+            .as_bool()
+            .cmp(&a["directory"].as_bool())
+            .then_with(|| a["name"].as_str().cmp(&b["name"].as_str()))
+    });
+    Ok(json!({"entries": entries, "truncated": truncated}))
+}
+
+/// The working tree against HEAD — or, in a worktree, against where its
+/// branch left the parent, so committed work shows too — as the review
+/// engine diffs it.
 fn changes(root: &Path) -> Result<Value> {
     use harness_review::{diff, git};
     let head = match git::head(root) {
         Ok(h) => h,
         Err(_) => return Ok(json!({"files": [], "note": "not a git repository with a commit"})),
     };
+    let wt = worktree_of(root);
+    let base = match &wt {
+        Some((parent, name)) => {
+            git::git(parent, &["merge-base", "HEAD", &format!("harness/{name}")]).unwrap_or(head)
+        }
+        None => head,
+    };
     let snap = git::snapshot(root, "harness app: working tree")?;
-    let files = diff::between(root, &head, &snap)?;
+    let files = diff::between(root, &base, &snap)?;
     let out: Vec<Value> = files
         .iter()
         .map(|f| {
@@ -450,13 +559,112 @@ fn changes(root: &Path) -> Result<Value> {
             })
         })
         .collect();
-    Ok(json!({"files": out}))
+    let worktree = wt.map(|(parent, name)| {
+        let branch = git::git(&parent, &["symbolic-ref", "--quiet", "--short", "HEAD"]).ok();
+        json!({"parent": parent.display().to_string(), "name": name, "into": branch})
+    });
+    Ok(json!({"files": out, "worktree": worktree}))
+}
+
+/// A new worktree off `root`'s HEAD, for a session that runs beside the ones
+/// already working there.
+fn create_worktree(root: &Path, name: &str) -> Result<Value> {
+    let ws = harness_workspace::Workspace::resolve(root)?;
+    if worktree_of(ws.root()).is_some() {
+        bail!("already in a worktree — make it from the main checkout");
+    }
+    let name: String = name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect();
+    let name = if name.is_empty() {
+        format!("wt-{}", harness_core::session::now_ms() % 100_000)
+    } else {
+        name
+    };
+    let wt = ws.create_worktree(&name)?;
+    Ok(json!({
+        "root": wt.root().display().to_string(),
+        "name": name,
+        "branch": format!("harness/{name}"),
+    }))
+}
+
+/// Land what the Changes pane shows, through the review engine: committed on
+/// HEAD in a workspace, merged into the parent from a worktree. The click is
+/// the approval, so the snapshot taken now is exactly what lands.
+fn land(root: &Path, message: &str) -> Result<Value> {
+    use harness_review::store::Target;
+    use harness_review::{Reviews, Verdict, git};
+    let root = root.canonicalize()?;
+    let (repo, target) = match worktree_of(&root) {
+        Some((parent, name)) => (parent, Target::Worktree { name }),
+        None => (root.clone(), Target::Workspace),
+    };
+    let message = if message.trim().is_empty() {
+        "Changes from harness"
+    } else {
+        message.trim()
+    };
+    let reviews = Reviews::new(&repo);
+    let s = reviews.open(message, target)?;
+    if git::tree_of(&repo, s.latest())? == git::tree_of(&repo, &s.base)? {
+        bail!("nothing to land — no changes since {}", git::short(&s.base));
+    }
+    reviews.verdict(&s, Verdict::Approve)?;
+    let s = reviews.load(&s.id)?;
+    let commit = reviews.land(&s)?;
+    Ok(json!({"commit": commit, "into": repo.display().to_string(), "review": s.id}))
+}
+
+/// Remove a worktree. Safe without asking when it holds nothing that has not
+/// landed: its state now is the snapshot its last review merged. Anything
+/// else needs `discard` — the caller has confirmed losing it. The branch
+/// stays either way, so committed work is never lost.
+fn remove_worktree(root: &Path, discard: bool) -> Result<Value> {
+    use harness_review::store::Target;
+    use harness_review::{Reviews, git};
+    let root = root.canonicalize()?;
+    let Some((parent, name)) = worktree_of(&root) else {
+        bail!("{} is not a harness worktree", root.display());
+    };
+    let target = Target::Worktree { name: name.clone() };
+    let landed = Reviews::new(&parent)
+        .list()
+        .into_iter()
+        .rev()
+        .find(|s| s.target == target && s.landed.is_some())
+        .map(|s| s.latest().to_string());
+    let now = git::snapshot(&root, "harness app: before removing")?;
+    let clean = match &landed {
+        Some(l) => git::tree_of(&parent, l)? == git::tree_of(&parent, &now)?,
+        None => git::tree_of(&parent, &now)? == git::tree_of(&parent, &format!("harness/{name}"))?,
+    };
+    let merged = harness_workspace::Workspace::resolve(&parent)?.worktree_merged(&name);
+    if !clean && !discard {
+        bail!("{name} has changes that have not landed — land them first, or discard them");
+    }
+    let dir = root.display().to_string();
+    git::git(&parent, &["worktree", "remove", "--force", &dir])?;
+    Ok(json!({
+        "removed": name,
+        "merged": merged || landed.is_some(),
+        "discarded": !clean,
+        "branch": format!("harness/{name}"),
+    }))
 }
 
 fn models() -> Value {
     let list: Vec<Value> = harness_provider::catalog::load()
         .into_iter()
-        .map(|m| json!({"id": m.id, "window": m.context_window}))
+        .map(|m| {
+            json!({
+                "id": m.id,
+                "window": m.context_window,
+                "input": m.input_per_mtok,
+                "output": m.output_per_mtok,
+            })
+        })
         .collect();
     json!({"models": list})
 }
@@ -729,7 +937,53 @@ async fn handle(stream: &mut TcpStream, token: &str, projects: &Projects) -> Res
             let r = tokio::task::spawn_blocking(move || changes(&root)).await?;
             json_reply(stream, r.map_err(|e| e.to_string())).await
         }
+        ("GET", "/api/files" | "/api/file") => {
+            let root = PathBuf::from(q("root"));
+            let path = q("path");
+            let preview = req.path == "/api/file";
+            let r = tokio::task::spawn_blocking(move || browse(&root, &path, preview)).await?;
+            json_reply(stream, r.map_err(|e| e.to_string())).await
+        }
+        ("GET", "/api/skills") => {
+            let root = PathBuf::from(q("root"));
+            let r = tokio::task::spawn_blocking(move || -> Result<Value> {
+                if root.as_os_str().is_empty() || !root.is_dir() {
+                    bail!("a workspace directory is required");
+                }
+                let ws = harness_workspace::Workspace::resolve(&root)?;
+                let skills: Vec<_> = harness_core::extensions::skills(ws.root())
+                    .into_iter()
+                    .map(|s| json!({"name": s.name, "description": s.description}))
+                    .collect();
+                Ok(json!({"skills": skills}))
+            })
+            .await?;
+            json_reply(stream, r.map_err(|e| e.to_string())).await
+        }
         ("GET", "/api/models") => json_reply(stream, Ok(models())).await,
+        ("POST", "/api/worktree") => {
+            let root = PathBuf::from(body["root"].as_str().unwrap_or_default());
+            let name = body["name"].as_str().unwrap_or_default().to_string();
+            let r = tokio::task::spawn_blocking(move || create_worktree(&root, &name)).await?;
+            json_reply(stream, r.map_err(|e| e.to_string())).await
+        }
+        ("POST", "/api/land") => {
+            let root = PathBuf::from(body["root"].as_str().unwrap_or_default());
+            let message = body["message"].as_str().unwrap_or_default().to_string();
+            let r = tokio::task::spawn_blocking(move || land(&root, &message)).await?;
+            json_reply(stream, r.map_err(|e| format!("{e:#}"))).await
+        }
+        ("POST", "/api/worktree/remove") => {
+            let root = PathBuf::from(body["root"].as_str().unwrap_or_default());
+            let key = root.canonicalize().unwrap_or_else(|_| root.clone());
+            let discard = body["discard"].as_bool().unwrap_or(false);
+            let r = tokio::task::spawn_blocking(move || remove_worktree(&root, discard)).await?;
+            if r.is_ok() {
+                // Its daemon connection goes with it.
+                projects.lock().await.remove(&key);
+            }
+            json_reply(stream, r.map_err(|e| e.to_string())).await
+        }
         ("POST", "/api/rpc") => {
             let root = body["root"].as_str().unwrap_or_default().to_string();
             let method = body["method"].as_str().unwrap_or_default().to_string();
@@ -810,6 +1064,16 @@ mod tests {
     fn query_values_are_decoded() {
         assert_eq!(url_decode("%2FUsers%2Fme%20x+y"), "/Users/me x y");
         assert_eq!(url_decode("100%"), "100%");
+    }
+
+    #[test]
+    fn worktrees_are_recognized_by_their_place() {
+        assert_eq!(
+            worktree_of(Path::new("/w/repo/.harness/worktrees/wt-1")),
+            Some((PathBuf::from("/w/repo"), "wt-1".into()))
+        );
+        assert_eq!(worktree_of(Path::new("/w/repo")), None);
+        assert_eq!(worktree_of(Path::new("/w/repo/worktrees/x")), None);
     }
 
     #[test]

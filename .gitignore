@@ -15,3 +15,9 @@ bench/terminalbench/harness-linux-*
 bench/terminalbench/.venv/
 bench/terminalbench/runs/
 bench/terminalbench/*.log
+
+# local tool state (eval skill install, graff runs)
+.agents/
+.claude/skills/
+.graff/
+skills-lock.json

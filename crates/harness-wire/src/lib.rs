@@ -28,6 +28,7 @@ pub const METHOD_SESSION_COMPACT: &str = "session/compact";
 pub const METHOD_SESSION_WORKTREE: &str = "session/worktree";
 pub const METHOD_SESSION_WORKTREE_EXIT: &str = "session/worktree-exit";
 pub const METHOD_MODEL_SET: &str = "model/set";
+pub const METHOD_EFFORT_SET: &str = "effort/set";
 pub const METHOD_WORKSPACE_FILES: &str = "workspace/files";
 pub const METHOD_AGENT_SPAWN: &str = "agent/spawn";
 pub const METHOD_AGENT_MESSAGE: &str = "agent/message";

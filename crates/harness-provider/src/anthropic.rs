@@ -105,19 +105,24 @@ impl Anthropic {
     /// `(thinking, effort)` for the model a request names. Per request, not
     /// per client: `/model` switches mid-session, and adaptive thinking sent
     /// to a model that does not take it is a 400.
-    fn reasoning_for(&self, model: &str) -> (Option<Value>, Option<String>) {
+    fn reasoning_for(
+        &self,
+        model: &str,
+        requested: Option<&str>,
+    ) -> (Option<Value>, Option<String>) {
+        let pref = requested.or(self.effort_pref.as_deref());
         if !self.reasoning {
             // Other endpoints: only an effort their table entry asked for (or
             // the user did, with HARNESS_EFFORT). Kimi K3 defaults to its
             // maximum when none is sent — about twice the output tokens of
             // `high` — so leaving it out is not neutral.
-            return (None, self.effort_pref.clone());
+            return (None, pref.map(str::to_string));
         }
         let caps = ClaudeCaps::of(model);
         let thinking_off = std::env::var("HARNESS_THINKING").is_ok_and(|v| v == "off");
         let thinking = (caps.adaptive && !thinking_off)
             .then(|| json!({"type": "adaptive", "display": "summarized"}));
-        let effort = match self.effort_pref.as_deref() {
+        let effort = match pref {
             Some(e) if caps.effort => Some(caps.clamp_effort(e).to_string()),
             // xhigh is the recommended level for coding and agentic work.
             None if caps.xhigh => Some("xhigh".into()),
@@ -471,12 +476,29 @@ impl Provider for Anthropic {
         self.window
     }
 
+    fn effort_levels(&self, model: &str) -> Vec<&'static str> {
+        if !self.reasoning {
+            // Anthropic-compatible endpoints take the field as-is.
+            return vec!["low", "medium", "high", "max"];
+        }
+        let caps = ClaudeCaps::of(model);
+        match (caps.effort, caps.xhigh) {
+            (false, _) => Vec::new(),
+            (true, false) => vec!["low", "medium", "high", "max"],
+            (true, true) => vec!["low", "medium", "high", "xhigh", "max"],
+        }
+    }
+
+    fn default_effort(&self, model: &str) -> Option<String> {
+        self.reasoning_for(model, None).1
+    }
+
     async fn complete(
         &self,
         req: &ModelRequest,
         sink: &mut dyn Sink,
     ) -> Result<AssistantTurn, ProviderError> {
-        let (thinking, effort) = self.reasoning_for(&req.model);
+        let (thinking, effort) = self.reasoning_for(&req.model, req.effort.as_deref());
         let body = build_body_with(
             req,
             thinking.as_ref(),
@@ -821,6 +843,7 @@ mod tests {
             ],
             model: "m".into(),
             max_tokens: 16,
+            effort: None,
         };
         let body = build_body(&req);
         assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
@@ -901,6 +924,7 @@ mod tests {
             messages,
             model: "deepseek-v4-pro".into(),
             max_tokens: 16,
+            effort: None,
         };
         let body = build_body(&req);
         let wire = body["messages"].as_array().unwrap();
@@ -922,6 +946,26 @@ mod tests {
     }
 
     #[test]
+    fn a_session_effort_overrides_the_default_and_is_clamped() {
+        let c = Anthropic::new("k".into(), "claude-opus-5".into()).with_reasoning(None);
+        assert_eq!(
+            c.reasoning_for("claude-opus-5", Some("low")).1.as_deref(),
+            Some("low")
+        );
+        assert_eq!(c.default_effort("claude-opus-5").as_deref(), Some("xhigh"));
+        // A session set to xhigh keeps working after /model to a 4.6 model.
+        assert_eq!(
+            c.reasoning_for("claude-sonnet-4-6", Some("xhigh"))
+                .1
+                .as_deref(),
+            Some("high")
+        );
+        assert!(c.effort_levels("claude-opus-5").contains(&"xhigh"));
+        assert!(!c.effort_levels("claude-sonnet-4-6").contains(&"xhigh"));
+        assert!(c.effort_levels("claude-haiku-4-5").is_empty());
+    }
+
+    #[test]
     fn reasoning_fields_follow_the_model() {
         let caps = |m: &str| ClaudeCaps::of(m);
         assert!(caps("claude-opus-5-5").adaptive && caps("claude-opus-5-5").xhigh);
@@ -939,9 +983,10 @@ mod tests {
             messages: vec![],
             model: model.into(),
             max_tokens: 16,
+            effort: None,
         };
         let body_for = |c: &Anthropic, model: &str| {
-            let (t, e) = c.reasoning_for(model);
+            let (t, e) = c.reasoning_for(model, None);
             build_body_with(&req(model), t.as_ref(), e.as_deref(), true)
         };
         // One client, switched between models mid-session.

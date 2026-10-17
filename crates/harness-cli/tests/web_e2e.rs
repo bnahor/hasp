@@ -302,6 +302,79 @@ async fn serves_the_app_and_drives_a_turn() {
 }
 
 #[tokio::test]
+async fn browses_workspace_files_with_confined_bounded_previews() {
+    let (mut child, port, token, home, root) = start_web().await;
+    let h = home.path();
+    let repo = std::path::Path::new(&root);
+    std::fs::create_dir(repo.join("src")).unwrap();
+    std::fs::write(repo.join("src/hello world.txt"), "<script>hello</script>\n").unwrap();
+    std::fs::write(repo.join("binary.bin"), [0, 255, 1]).unwrap();
+    std::fs::write(repo.join("large.txt"), vec![b'x'; 300_000]).unwrap();
+    std::os::unix::fs::symlink(h, repo.join("escape")).unwrap();
+    let base = format!("token={token}&root={}", root.replace(' ', "%20"));
+    let (status, _) = http(h, port, &get("/api/files")).await;
+    assert_eq!(status, 401);
+    let listing = get_json(h, port, &format!("/api/files?{base}")).await;
+    let entries = listing["result"]["entries"].as_array().unwrap();
+    assert_eq!(entries[0]["name"], "src");
+    assert!(entries.iter().any(|e| e["name"] == "a.txt"));
+    assert!(
+        !entries
+            .iter()
+            .any(|e| e["name"] == ".git" || e["name"] == "escape")
+    );
+    let nested = get_json(h, port, &format!("/api/files?{base}&path=src")).await;
+    assert_eq!(
+        nested["result"]["entries"][0]["path"],
+        "src/hello world.txt"
+    );
+    let text = get_json(
+        h,
+        port,
+        &format!("/api/file?{base}&path=src/hello%20world.txt"),
+    )
+    .await;
+    assert_eq!(text["result"]["text"], "<script>hello</script>\n");
+    let binary = get_json(h, port, &format!("/api/file?{base}&path=binary.bin")).await;
+    assert_eq!(binary["result"]["binary"], true);
+    assert!(binary["result"]["text"].is_null());
+    let large = get_json(h, port, &format!("/api/file?{base}&path=large.txt")).await;
+    assert_eq!(large["result"]["truncated"], true);
+    assert_eq!(large["result"]["text"].as_str().unwrap().len(), 256 * 1024);
+    for path in [
+        "../outside",
+        "%2Fetc%2Fpasswd",
+        "escape/web.stderr",
+        "missing",
+        "src",
+    ] {
+        let denied = get_json(h, port, &format!("/api/file?{base}&path={path}")).await;
+        assert_eq!(denied["ok"], false, "{path}: {denied}");
+    }
+    let denied = get_json(h, port, &format!("/api/files?{base}&path=escape")).await;
+    assert_eq!(denied["ok"], false);
+
+    // Catalog uses the same discovery as the agent, without exposing skill bodies.
+    let skill_dir = repo.join(".harness/skills/smoke");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: smoke\ndescription: Smoke skill\n---\nPrivate body marker\n",
+    )
+    .unwrap();
+    let (status, _) = http(h, port, &get("/api/skills")).await;
+    assert_eq!(status, 401);
+    let skills = get_json(h, port, &format!("/api/skills?{base}")).await;
+    assert_eq!(
+        skills["result"]["skills"],
+        serde_json::json!([{"name": "smoke", "description": "Smoke skill"}])
+    );
+    let denied = get_json(h, port, &format!("/api/skills?token={token}")).await;
+    assert_eq!(denied["ok"], false);
+    let _ = child.kill().await;
+}
+
+#[tokio::test]
 async fn streams_assistant_deltas_over_sse() {
     let (mut child, port, token, _home, root) = start_web().await;
 
@@ -466,5 +539,181 @@ async fn server_survives_its_stdout_being_closed() {
     }
     assert_eq!(status, 401, "server is up and answering (no token → 401)");
     assert!(child.try_wait().unwrap().is_none(), "and still running");
+    let _ = child.kill().await;
+}
+
+async fn post_json(
+    home: &std::path::Path,
+    port: u16,
+    token: &str,
+    path: &str,
+    body: serde_json::Value,
+) -> serde_json::Value {
+    let (status, body) = http(
+        home,
+        port,
+        &post(&format!("{path}?token={token}"), &body.to_string()),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    serde_json::from_str(&body).unwrap()
+}
+
+/// A worktree is its own project: its own resident session (so it can run
+/// beside the main checkout), its changes measured from where it branched,
+/// and it lands back into the parent as a merge.
+#[tokio::test]
+async fn worktrees_run_beside_the_checkout_and_land_back() {
+    let (mut child, port, token, home, root) = start_web().await;
+    let h = home.path();
+    let repo = std::path::Path::new(&root);
+    for (k, v) in [("user.name", "t"), ("user.email", "t@t")] {
+        git(repo, &["config", k, v]);
+    }
+
+    let v = post_json(
+        h,
+        port,
+        &token,
+        "/api/worktree",
+        serde_json::json!({"root": root, "name": "side/../x y"}),
+    )
+    .await;
+    assert_eq!(v["ok"], true, "{v}");
+    assert_eq!(v["result"]["name"], "sidexy", "names are sanitized: {v}");
+    let wt = v["result"]["root"].as_str().unwrap().to_string();
+
+    // Its own resident: a turn there reports the worktree's root.
+    let v = rpc(
+        h,
+        port,
+        &token,
+        &wt,
+        "session/prompt",
+        serde_json::json!({"prompt": "hi wt"}),
+    )
+    .await;
+    assert_eq!(v["ok"], true, "{v}");
+    let v = rpc(h, port, &token, &wt, "session/stats", serde_json::json!({})).await;
+    assert_eq!(v["result"]["root"], wt.as_str(), "{v}");
+    assert!(v["result"]["efforts"].is_array(), "{v}");
+
+    // Work in the worktree, committed and not: both show against the fork point.
+    let wtp = std::path::Path::new(&wt);
+    std::fs::write(wtp.join("b.txt"), "side\n").unwrap();
+    git(wtp, &["add", "b.txt"]);
+    git(
+        wtp,
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-qm",
+            "b",
+        ],
+    );
+    std::fs::write(wtp.join("a.txt"), "one\ntwo\nthree\n").unwrap();
+    let v = get_json(
+        h,
+        port,
+        &format!("/api/changes?token={token}&root={}", wt.replace(' ', "%20")),
+    )
+    .await;
+    let paths: Vec<&str> = v["result"]["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|f| f["path"].as_str())
+        .collect();
+    assert!(paths.contains(&"a.txt") && paths.contains(&"b.txt"), "{v}");
+    assert_eq!(v["result"]["worktree"]["parent"], root.as_str(), "{v}");
+
+    // Landing merges exactly that into the parent's branch.
+    let v = post_json(
+        h,
+        port,
+        &token,
+        "/api/land",
+        serde_json::json!({"root": wt, "message": "side work"}),
+    )
+    .await;
+    assert_eq!(v["ok"], true, "{v}");
+    assert_eq!(
+        std::fs::read_to_string(repo.join("b.txt")).unwrap(),
+        "side\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo.join("a.txt")).unwrap(),
+        "one\ntwo\nthree\n"
+    );
+
+    // Nothing left to land is said plainly, not committed empty.
+    let v = post_json(
+        h,
+        port,
+        &token,
+        "/api/land",
+        serde_json::json!({"root": root, "message": "again"}),
+    )
+    .await;
+    assert_eq!(v["ok"], false, "{v}");
+
+    // Removal after landing needs no confirmation: nothing would be lost.
+    let v = post_json(
+        h,
+        port,
+        &token,
+        "/api/worktree/remove",
+        serde_json::json!({"root": wt}),
+    )
+    .await;
+    assert_eq!(v["ok"], true, "{v}");
+    assert_eq!(v["result"]["discarded"], false, "{v}");
+    assert_eq!(v["result"]["merged"], true, "{v}");
+    assert!(!wtp.exists());
+
+    // Unlanded work is not removed without saying so.
+    let v = post_json(
+        h,
+        port,
+        &token,
+        "/api/worktree",
+        serde_json::json!({"root": root, "name": "scrap"}),
+    )
+    .await;
+    let scrap = v["result"]["root"].as_str().unwrap().to_string();
+    std::fs::write(std::path::Path::new(&scrap).join("c.txt"), "draft\n").unwrap();
+    let v = post_json(
+        h,
+        port,
+        &token,
+        "/api/worktree/remove",
+        serde_json::json!({"root": scrap}),
+    )
+    .await;
+    assert_eq!(v["ok"], false, "{v}");
+    let v = post_json(
+        h,
+        port,
+        &token,
+        "/api/worktree/remove",
+        serde_json::json!({"root": scrap, "discard": true}),
+    )
+    .await;
+    assert_eq!(v["result"]["discarded"], true, "{v}");
+
+    // Effort: the mock provider takes none, and says so.
+    let v = rpc(
+        h,
+        port,
+        &token,
+        &root,
+        "effort/set",
+        serde_json::json!({"effort": "high"}),
+    )
+    .await;
+    assert_eq!(v["ok"], false, "{v}");
     let _ = child.kill().await;
 }

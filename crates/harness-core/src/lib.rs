@@ -258,6 +258,9 @@ pub struct ModelRequest {
     pub messages: Vec<AgentMessage>,
     pub model: String,
     pub max_tokens: u32,
+    /// Reasoning effort for this request, overriding the provider's default.
+    /// Providers without effort controls ignore it.
+    pub effort: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -304,6 +307,17 @@ impl ProviderError {
 pub trait Provider: Send + Sync {
     fn name(&self) -> &'static str;
     fn context_window(&self) -> usize;
+
+    /// Effort levels `model` accepts on this provider, weakest first; empty
+    /// when the provider has no effort control.
+    fn effort_levels(&self, _model: &str) -> Vec<&'static str> {
+        Vec::new()
+    }
+
+    /// The effort sent for `model` when a request names none.
+    fn default_effort(&self, _model: &str) -> Option<String> {
+        None
+    }
 
     async fn complete(
         &self,

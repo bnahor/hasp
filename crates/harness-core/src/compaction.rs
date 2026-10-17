@@ -118,6 +118,7 @@ pub fn prepare(
         ))],
         model: model.to_string(),
         max_tokens,
+        effort: None,
     };
     Ok(CompactionPlan {
         request,

@@ -84,6 +84,7 @@ fn req() -> ModelRequest {
         }],
         model: "m-x".into(),
         max_tokens: 64,
+        effort: None,
     }
 }
 

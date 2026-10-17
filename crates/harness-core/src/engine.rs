@@ -172,6 +172,9 @@ pub struct Engine {
     pub gate: Arc<tokio::sync::Mutex<Box<dyn Gate>>>,
     pub model: String,
     pub max_tokens: u32,
+    /// Reasoning effort for this session's requests; `None` is the
+    /// provider's default for the model.
+    pub effort: Option<String>,
     cancel_flag: Arc<AtomicBool>,
     cancel_notify: Arc<tokio::sync::Notify>,
     notice_inbox: Arc<Mutex<Vec<String>>>,
@@ -290,6 +293,7 @@ impl Engine {
             gate: Arc::new(tokio::sync::Mutex::new(gate)),
             model,
             max_tokens,
+            effort: None,
             cancel_flag,
             cancel_notify,
             notice_inbox: Arc::new(Mutex::new(Vec::new())),
@@ -413,6 +417,7 @@ impl Engine {
             messages: ctx.messages,
             model: self.model.clone(),
             max_tokens: self.max_tokens,
+            effort: self.effort.clone(),
         }
     }
 

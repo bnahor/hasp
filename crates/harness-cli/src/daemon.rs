@@ -697,6 +697,8 @@ impl Handler {
                             "cacheWrite": totals.cache_write,
                             "output": totals.output,
                             "estTokens": eng.context_est_tokens(),
+                            "effort": eng.effort.clone().or_else(|| eng.provider.default_effort(&eng.model)),
+                            "efforts": eng.provider.effort_levels(&eng.model),
                             "ctx": crate::backend::ctx_json(&eng),
                         })),
                     );
@@ -705,6 +707,7 @@ impl Handler {
                 }
             }
             harness_wire::METHOD_MODEL_SET
+            | harness_wire::METHOD_EFFORT_SET
             | harness_wire::METHOD_SESSION_HISTORY
             | harness_wire::METHOD_SESSION_LISTINGS
             | harness_wire::METHOD_SESSION_BRANCH
@@ -1317,6 +1320,18 @@ impl Handler {
                             Ok(serde_json::json!({"model": model}))
                         }
                     }
+                    harness_wire::METHOD_EFFORT_SET => match params["effort"].as_str() {
+                        // null or "" goes back to the provider's default.
+                        None | Some("") => {
+                            eng.effort = None;
+                            Ok(serde_json::json!({"effort": eng.provider.default_effort(&eng.model)}))
+                        }
+                        Some(e) if eng.provider.effort_levels(&eng.model).contains(&e) => {
+                            eng.effort = Some(e.to_string());
+                            Ok(serde_json::json!({"effort": e}))
+                        }
+                        Some(e) => Err(format!("{} does not take effort {e}", eng.model)),
+                    },
                     harness_wire::METHOD_GOAL_SET => {
                         eng.set_goal(
                             params["action"].as_str().unwrap_or("set"),

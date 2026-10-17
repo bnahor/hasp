@@ -462,6 +462,7 @@ mod tests {
             messages,
             model: "m".into(),
             max_tokens: 64,
+            effort: None,
         }
     }
 
