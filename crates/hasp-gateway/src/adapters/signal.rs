@@ -27,6 +27,7 @@ pub struct Signal {
     account_uuid: String,
     role: Role,
     http: reqwest::Client,
+    per_chat_interval_ms: u64,
     window_ms: u64,
     rpc_id: AtomicU64,
 }
@@ -34,7 +35,12 @@ pub struct Signal {
 impl Signal {
     pub fn new(base: &str, account_uuid: &str, role: Role, window_ms: u64) -> Self {
         Self { base: base.trim_end_matches('/').into(), account_uuid: account_uuid.into(), role,
-               http: reqwest::Client::new(), window_ms, rpc_id: AtomicU64::new(1) }
+               http: reqwest::Client::new(), per_chat_interval_ms: 1_000, window_ms, rpc_id: AtomicU64::new(1) }
+    }
+
+    pub fn with_per_chat_interval_ms(mut self, ms: u64) -> Self {
+        self.per_chat_interval_ms = ms;
+        self
     }
 
     /// One SSE `data:` payload (a receive notification or its params) -> Inbound.
@@ -124,7 +130,7 @@ impl Adapter for Signal {
     }
 
     fn caps(&self) -> Caps {
-        Caps { max_len: 2000, buttons: false, edits: false, per_chat_interval_ms: 1_000 }
+        Caps { max_len: 2000, buttons: false, edits: false, per_chat_interval_ms: self.per_chat_interval_ms }
     }
 
     fn role_of(&self, chat_id: &str, _direct: bool) -> Role {

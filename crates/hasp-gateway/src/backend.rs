@@ -31,7 +31,11 @@ pub fn session_dir(root: &Path, session_key: &str) -> PathBuf {
 /// Used for agent-side API calls: the MCP process reports its working
 /// directory, which the model can't change.
 pub fn session_of_dir(root: &Path, dir: &Path) -> Option<String> {
-    let name = dir.strip_prefix(root).ok()?.components().next()?.as_os_str().to_str()?;
+    // Compare real paths (macOS: /var is /private/var); a symlink inside the
+    // workspace can't point the lookup at another session either way.
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    let name = dir.strip_prefix(&root).ok()?.components().next()?.as_os_str().to_str()?;
     if name.len() % 2 != 0 {
         return None;
     }

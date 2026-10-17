@@ -22,6 +22,7 @@ pub struct WhatsApp {
     /// The owner's own chat (PN or LID JID, normalized by the bridge).
     self_jids: Vec<String>,
     http: reqwest::Client,
+    per_chat_interval_ms: u64,
     wait_s: u64,
 }
 
@@ -32,8 +33,14 @@ impl WhatsApp {
             token: token.into(),
             self_jids,
             http: reqwest::Client::builder().timeout(std::time::Duration::from_secs(wait_s + 15)).build().expect("client"),
+            per_chat_interval_ms: 2_000,
             wait_s,
         }
+    }
+
+    pub fn with_per_chat_interval_ms(mut self, ms: u64) -> Self {
+        self.per_chat_interval_ms = ms;
+        self
     }
 
     fn is_self_chat(&self, jid: &str) -> bool {
@@ -88,7 +95,7 @@ impl Adapter for WhatsApp {
 
     fn caps(&self) -> Caps {
         // No buttons for personal accounts: approvals use the /approve command.
-        Caps { max_len: 4000, buttons: false, edits: false, per_chat_interval_ms: 2_000 }
+        Caps { max_len: 4000, buttons: false, edits: false, per_chat_interval_ms: self.per_chat_interval_ms }
     }
 
     fn role_of(&self, chat_id: &str, _direct: bool) -> Role {

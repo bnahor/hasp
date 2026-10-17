@@ -102,6 +102,16 @@ impl Store {
             .flatten()
     }
 
+    /// For surfaces that authenticate the owner themselves (the web view's
+    /// owner token): bind that surface's fixed sender id to the owner.
+    pub fn link_surface(&self, adapter: &str, sender_id: &str, by: &str) -> Result<()> {
+        self.conn().execute(
+            "INSERT OR IGNORE INTO identities(adapter, sender_id, person_id, linked_by, linked) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![adapter, sender_id, OWNER, by, now_ms()],
+        )?;
+        Ok(())
+    }
+
     pub fn unlink(&self, adapter: &str, sender_id: &str, by: &str) -> Result<()> {
         self.conn().execute("DELETE FROM identities WHERE adapter = ?1 AND sender_id = ?2", params![adapter, sender_id])?;
         self.audit(by, "identity_unlinked", &format!("{adapter}:{sender_id}"), "");
