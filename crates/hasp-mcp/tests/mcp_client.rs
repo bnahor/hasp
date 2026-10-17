@@ -86,7 +86,13 @@ async fn tools_are_listed_and_a_call_reaches_the_transcript() {
     let ws = Workspace::resolve(tmp.path()).unwrap();
     write_project_config(tmp.path(), env!("CARGO_BIN_EXE_mcp-fake-server"));
 
-    let bridged = hasp_mcp::tools_for(&ws).await;
+    // Only this project's server: the user's own ~/.hasp/mcp.json servers also
+    // load here and must not make the test depend on the machine it runs on.
+    let bridged: Vec<_> = hasp_mcp::tools_for(&ws)
+        .await
+        .into_iter()
+        .filter(|t| t.spec().name.starts_with("mcp__fake__"))
+        .collect();
     let names: Vec<String> = bridged.iter().map(|t| t.spec().name).collect();
     assert_eq!(
         names,
@@ -177,7 +183,7 @@ async fn a_broken_server_is_skipped_and_startup_still_succeeds() {
 
     let bridged = hasp_mcp::tools_for(&ws).await;
     assert!(
-        bridged.is_empty(),
+        !bridged.iter().any(|t| t.spec().name.starts_with("mcp__fake__")),
         "unstartable server contributes no tools"
     );
 }
