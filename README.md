@@ -20,10 +20,32 @@ worktree branches are still found, `HARNESS_*` environment variables still
 work (`HASP_*` wins when both are set), and `HARNESS.md` is still read.
 Rebuild the container guest agent once with `hasp env build-guest`.
 
+## Install
+
+From a checkout (Rust stable; this is what `hasp update` repeats):
+
+```sh
+git clone git@github.com:bnahor/hasp.git && cd hasp
+cargo install --locked --path crates/hasp-cli       # → ~/.cargo/bin/hasp
+cargo install --locked --path crates/hasp-desktop   # → ~/.cargo/bin/hasp-desktop (native app)
+```
+
+From a release (each `v*` tag builds macOS arm64/x86_64 and Linux x86_64,
+with both binaries in one tarball). The repo is private, so download with
+`gh`, which uses your GitHub login:
+
+```sh
+gh release download -R bnahor/hasp -p "hasp-$(uname -m | sed s/arm64/aarch64/)-apple-darwin.tar.gz"
+tar -xzf hasp-*.tar.gz && install -m 0755 hasp-*/hasp hasp-*/hasp-desktop ~/.local/bin/
+```
+
+or `HASP_REPO=bnahor/hasp sh install.sh` once the repo (or a mirror) is
+public. On Linux the native app needs the usual GPU/windowing libraries
+(fontconfig, Wayland/X11, Vulkan); `hasp` itself needs nothing.
+
 ## Quickstart
 
 ```sh
-cargo install --path crates/hasp-cli   # from a checkout → ~/.cargo/bin/hasp
 hasp --version                         # → hasp 0.1.0
 hasp login                  # Anthropic key → ~/.hasp/credentials.json (0600)
 hasp login deepseek         # …or DeepSeek (Anthropic-compatible endpoint, 1M ctx)

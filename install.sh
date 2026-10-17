@@ -41,6 +41,10 @@ dest="${HASP_BIN_DIR:-$HOME/.local/bin}"
 mkdir -p "$dest"
 install -m 0755 "$tmp/$name/hasp" "$dest/hasp"
 echo "installed $dest/hasp"
+if [ -f "$tmp/$name/hasp-desktop" ]; then
+  install -m 0755 "$tmp/$name/hasp-desktop" "$dest/hasp-desktop"
+  echo "installed $dest/hasp-desktop"
+fi
 case ":$PATH:" in
   *":$dest:"*) ;;
   *) echo "note: add $dest to PATH" ;;
