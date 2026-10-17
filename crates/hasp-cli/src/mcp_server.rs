@@ -28,6 +28,10 @@ impl Gate for DenyGate {
     fn check_write(&mut self, path: &str) -> GateDecision {
         self.0.decide_write(path, |_| 'n')
     }
+
+    fn check_tool(&mut self, name: &str, input: &serde_json::Value) -> GateDecision {
+        self.0.decide_tool(name, input, |_| 'n')
+    }
 }
 
 fn yolo() -> bool {

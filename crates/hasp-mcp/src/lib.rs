@@ -57,7 +57,11 @@ impl Tool for McpTool {
         }
     }
 
-    async fn execute(&self, args: Value, _ctx: &mut ToolCtx<'_>) -> ToolOutput {
+    async fn execute(&self, args: Value, ctx: &mut ToolCtx<'_>) -> ToolOutput {
+        let name = tool_name(&self.client.name, &self.def.name);
+        if let hasp_core::GateDecision::Deny(reason) = ctx.gate.check_tool(&name, &args) {
+            return ToolOutput::error(format!("{name} not run: {reason}"));
+        }
         match self.client.call_tool_full(&self.def.name, args).await {
             Ok((text, is_error, images)) => ToolOutput {
                 content: text,

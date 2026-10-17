@@ -298,6 +298,10 @@ impl Gate for WireGate {
     fn check_write(&mut self, path: &str) -> GateDecision {
         self.core.decide_write(path, |q| Self::ask(&self.client, q))
     }
+
+    fn check_tool(&mut self, name: &str, input: &serde_json::Value) -> GateDecision {
+        self.core.decide_tool(name, input, |q| Self::ask(&self.client, q))
+    }
 }
 
 /// A session that lives in the daemon rather than in a client.

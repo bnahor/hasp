@@ -420,6 +420,7 @@ pub trait Tool: Send + Sync {
 
 /// The gate resolves approvals; prompting (when interactive) happens inside
 /// the implementation. A `Deny` becomes the tool result so the model adapts.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GateDecision {
     Allow,
     Deny(String),
@@ -428,6 +429,14 @@ pub enum GateDecision {
 pub trait Gate: Send + Sync {
     fn check_bash(&mut self, command: &str) -> GateDecision;
     fn check_write(&mut self, path: &str) -> GateDecision;
+    /// Tools from MCP servers (`mcp__<server>__<tool>`). They can do anything
+    /// their server can — click on a desktop, run commands, power machines off —
+    /// so they go through the gate like bash does. The default allows, for the
+    /// test and sandbox gates; the real gates apply the tool policy.
+    fn check_tool(&mut self, name: &str, input: &serde_json::Value) -> GateDecision {
+        let _ = (name, input);
+        GateDecision::Allow
+    }
 }
 
 /// The gate concurrent (read-only) calls run under: they never ask, and if
