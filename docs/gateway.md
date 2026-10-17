@@ -47,7 +47,9 @@ platform ──poll──▶ adapter ──▶ store (inbound + cursor, one txn)
 - **Sessions.** Every linked person has one personal conversation shared
   across channels and the web view (`personal:<person>`). `/session new NAME`
   and `/session use KEY` switch a chat; `/task TEXT` runs a separate task
-  session whose result comes back to the chat.
+  session whose result comes back to the chat; `/edge [needs:gpu|node:pc] TEXT`
+  dispatches it as a Threadline task for a home node's edge worker (lease,
+  fencing, Dagu), and its result comes back through the Threadline source.
 
 ## Approvals (the permission authority)
 Deterministic code in the gateway process, outside every agent workspace:

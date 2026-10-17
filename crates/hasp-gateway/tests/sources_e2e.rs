@@ -107,3 +107,38 @@ async fn notifications_are_capped_and_agent_turns_wrap_untrusted_mail() {
     g.events_once().await.unwrap();
     assert_eq!(g.store.json_rows("SELECT COUNT(*) AS n FROM events WHERE state = 'digest'", &[]).unwrap()[0]["n"], 10);
 }
+
+
+#[tokio::test]
+async fn edge_dispatch_from_chat_creates_a_routed_threadline_task() {
+    let dir = tempfile::tempdir().unwrap();
+    let created = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+    let c2 = created.clone();
+    let tl_url = serve(Arc::new(move |r: Req| match (r.method.as_str(), r.path.as_str()) {
+        ("POST", "/v1/clients/register") => Resp::Json(200, json!({"clientId": "client_gw"})),
+        ("POST", "/v1/tasks") => {
+            c2.lock().unwrap().push(r.json());
+            Resp::Json(200, json!({"taskId": "task_x1", "receipt": {"status": "committed"}}))
+        }
+        _ => Resp::Json(404, json!({})),
+    })).await;
+    let tg = Arc::new(common::FakeTelegram { token: "T".into(), ..Default::default() });
+    let tg_url = serve(tg.handler()).await;
+    let mut g = gw(dir.path(), Arc::new(MockBackend::default()));
+    g.add_adapter(Arc::new(hasp_gateway::adapters::telegram::Telegram::new(&tg_url, "T", 0).with_per_chat_interval_ms(0)));
+    g.dispatcher = Some(hasp_edge::threadline::Threadline::new(&tl_url, "x"));
+    let g = Arc::new(g);
+    let code = g.store.issue_link_code("owner", 60_000, "cli").unwrap();
+    tg.push_text(1, 5, 5, "Me", &format!("/link {code}"), None);
+    tg.push_text(2, 5, 5, "Me", "/edge needs:gpu train the small model", None);
+    for _ in 0..2 {
+        g.poll_adapter("telegram").await.unwrap();
+        g.route_once().await.unwrap();
+        g.deliver_once().await.unwrap();
+    }
+    let t = created.lock().unwrap()[0].clone();
+    assert_eq!(t["description"], "train the small model");
+    let labels: Vec<&str> = t["labels"].as_array().unwrap().iter().map(|l| l.as_str().unwrap()).collect();
+    assert!(labels.contains(&"edge") && labels.contains(&"needs:gpu"), "{labels:?}");
+    assert!(tg.texts().iter().any(|m| m.starts_with("Dispatched task_x1 (needs:gpu)")), "{:?}", tg.texts());
+}

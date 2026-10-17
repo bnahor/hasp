@@ -44,12 +44,14 @@ pub struct Gateway {
     pub leader: Arc<dyn Leader>,
     pub sources: Vec<Arc<dyn EventSource>>,
     pub transcriber: Option<Arc<dyn Transcriber>>,
+    /// The node's threadlined, for `/edge` (work for a specific machine).
+    pub dispatcher: Option<hasp_edge::threadline::Threadline>,
     pub cfg: Config,
     last_sent: Mutex<HashMap<(String, String), i64>>,
 }
 
 const HELP: &str = "Commands: /status · /stop · /resume · /steer TEXT · /followup TEXT · /session [list|use KEY|new NAME] · \
-/task TEXT · /approve ID CODE · /deny ID CODE · /waiting · /cancel WID · /inbox · /remember TEXT · /memory · /forget ID · \
+/task TEXT · /edge [needs:gpu|node:pc] TEXT · /approve ID CODE · /deny ID CODE · /waiting · /cancel WID · /inbox · /remember TEXT · /memory · /forget ID · \
 /quiet HH:MM-HH:MM|off · /sethome · /workflows · /activate NAME V SHA · /link [CODE]";
 
 fn origin_of(adapter: &str, e: &Inbound, person: &str) -> Origin {
@@ -58,7 +60,7 @@ fn origin_of(adapter: &str, e: &Inbound, person: &str) -> Origin {
 
 impl Gateway {
     pub fn new(store: Store, backend: Arc<dyn Backend>, leader: Arc<dyn Leader>, cfg: Config) -> Self {
-        Self { store, adapters: BTreeMap::new(), backend, leader, sources: vec![], transcriber: None, cfg, last_sent: Mutex::new(HashMap::new()) }
+        Self { store, adapters: BTreeMap::new(), backend, leader, sources: vec![], transcriber: None, dispatcher: None, cfg, last_sent: Mutex::new(HashMap::new()) }
     }
 
     pub fn add_adapter(&mut self, a: Arc<dyn Adapter>) {
@@ -336,6 +338,25 @@ impl Gateway {
                 let key = format!("task:{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
                 self.store.enqueue_turn(&key, Some(id), origin, rest, "task")?;
                 format!("Started {key}. Its result will come back here.")
+            }
+            "/edge" if !rest.is_empty() => {
+                // Work for a home node: a Threadline task the edge workers claim
+                // (lease + fencing) and run through Dagu; the result comes back
+                // as a task_completed / task_blocked event.
+                let Some(tl) = &self.dispatcher else { return Ok("No Threadline dispatcher configured.".into()) };
+                let mut labels = vec!["edge".to_string(), format!("from:{adapter}")];
+                let words: Vec<&str> = rest.split_whitespace().collect();
+                let routing: Vec<String> = words.iter().take_while(|w| w.starts_with("needs:") || w.starts_with("node:")).map(|w| w.to_string()).collect();
+                let text = words[routing.len()..].join(" ");
+                if text.is_empty() {
+                    return Ok("Usage: /edge [needs:gpu|node:pc] TEXT".into());
+                }
+                labels.extend(routing);
+                let client = tl.register_client("hasp-gateway", &format!("{adapter}:{}", e.chat_id)).await?;
+                let title: String = text.chars().take(60).collect();
+                let id = tl.create_task(&client, &title, &text, &labels).await?;
+                self.store.audit(&format!("{adapter}:{}", e.sender_id), "edge_dispatched", &id, &labels.join(","));
+                format!("Dispatched {id} ({}). I'll report when a node finishes it.", labels[2..].join(" "))
             }
             "/approve" | "/deny" => {
                 let mut it = rest.split_whitespace();

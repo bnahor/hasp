@@ -166,6 +166,10 @@ async fn build(cfg: &Value, leader: Arc<dyn Leader>) -> Result<Arc<Gateway>> {
     s.link_surface("web", hasp_gateway::adapters::web::WEB_SENDER, "owner-token")?;
     if let Some(src) = cfg.get("sources") {
         if let Some(t) = src.get("threadline") {
+            gw.dispatcher = Some(hasp_edge::threadline::Threadline::new(
+                t["threadlined_url"].as_str().unwrap_or("http://127.0.0.1:8788"),
+                &secret(t["token_file"].as_str().context("sources.threadline.token_file")?)?,
+            ));
             let tl = hasp_edge::threadline::Threadline::new(
                 t["threadlined_url"].as_str().unwrap_or("http://127.0.0.1:8788"),
                 &secret(t["token_file"].as_str().context("sources.threadline.token_file")?)?,
