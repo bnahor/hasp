@@ -1,0 +1,42 @@
+//! The hasp desktop app (native, GPUI). Step one: prove the toolkit builds
+//! and opens a window on this machine.
+
+use gpui_kit::component::button::*;
+use gpui_kit::component::*;
+use gpui_kit::*;
+
+struct Hello;
+
+impl Render for Hello {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .v_flex()
+            .gap_2()
+            .size_full()
+            .items_center()
+            .justify_center()
+            .child("hasp")
+            .child(
+                Button::new("ok")
+                    .primary()
+                    .label("Native window")
+                    .on_click(|_, _, _| {}),
+            )
+    }
+}
+
+fn main() {
+    gpui_kit::application()
+        .with_assets(gpui_kit::assets::Assets)
+        .run(move |cx| {
+            gpui_kit::init(cx);
+            cx.spawn(async move |cx| {
+                cx.open_window(WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|_| Hello);
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+                .expect("open window");
+            })
+            .detach();
+        });
+}

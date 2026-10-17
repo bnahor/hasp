@@ -3,6 +3,8 @@ resolver = "2"
 members = [
     "crates/hasp-bus",
     "crates/hasp-cli",
+    "crates/hasp-config",
+    "crates/hasp-desktop",
     "crates/hasp-core",
     "crates/hasp-agents",
     "crates/hasp-diff",
@@ -22,6 +24,7 @@ license = "MIT"
 
 [workspace.dependencies]
 hasp-bus = { path = "crates/hasp-bus" }
+hasp-config = { path = "crates/hasp-config" }
 hasp-core = { path = "crates/hasp-core" }
 hasp-agents = { path = "crates/hasp-agents" }
 hasp-diff = { path = "crates/hasp-diff" }
