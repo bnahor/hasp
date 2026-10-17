@@ -6,9 +6,9 @@ call per turn, never asked for approval, and never thought. 2026-09-20.
 
 ## DeepSeek support (`--provider deepseek`)
 
-- `harness-provider/src/deepseek.rs`: `https://api.deepseek.com/anthropic` (their
+- `hasp-provider/src/deepseek.rs`: `https://api.deepseek.com/anthropic` (their
   Anthropic-compatible endpoint), default model `deepseek-v4-pro`.
-- `harness login deepseek` / `DEEPSEEK_API_KEY` / `deepseek_api_key` in
+- `hasp login deepseek` / `DEEPSEEK_API_KEY` / `deepseek_api_key` in
   `credentials.json`; `doctor` lists all three providers and where each key came
   from.
 - Models **`deepseek-v4-pro`** and **`deepseek-flash`** (verified against
@@ -41,9 +41,9 @@ call per turn, never asked for approval, and never thought. 2026-09-20.
    path. (Claude enforces the same rule — this was latent for Anthropic too.)
 3. **The daemon ignored the selected provider's default model.** `open_session`
    had its own hardcoded `claude-sonnet-4-5` fallback while `provider_factory`
-   had a per-provider one, so `HARNESS_PROVIDER=deepseek harness` ran a Claude
+   had a per-provider one, so `HASP_PROVIDER=deepseek harness` ran a Claude
    model name against DeepSeek. Removed the duplication: one
-   `harness_provider::default_model()` plus `anthropic_compatible()` used by both
+   `hasp_provider::default_model()` plus `anthropic_compatible()` used by both
    the CLI and the daemon, and the TUI now always passes its resolved provider
    **and** model to the auto-spawned daemon instead of only when `--model` was
    given.
@@ -52,7 +52,7 @@ call per turn, never asked for approval, and never thought. 2026-09-20.
    that session failed with the same 400 as (2). `SessionManager::open` now
    closes dangling turns with an explicit interrupted `tool_result`, journaled
    like any other outcome (idempotent; counted in `repaired_tool_calls`, surfaced
-   to the user as a note). Tests in `harness-core/tests/session_repair.rs`.
+   to the user as a note). Tests in `hasp-core/tests/session_repair.rs`.
 5. **The context window was hardcoded to 200k**, so DeepSeek's 1M context was
    under-reported 5× and compaction fired far too early. The window is now
    resolved per model from the catalog (`context_window_for`).
@@ -64,7 +64,7 @@ actually in use.
 
 ## Test infrastructure
 
-`HARNESS_MOCK_SCRIPT` gives the echo provider a scripted mode
+`HASP_MOCK_SCRIPT` gives the echo provider a scripted mode
 (`[{"tool": "write", "input": {...}}, {"text": "done"}]`), which is what lets
 daemon/PTY tests exercise real tool calls and therefore real approvals.
 

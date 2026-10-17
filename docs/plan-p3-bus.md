@@ -21,7 +21,7 @@
 > - Registry status stamps *before* the notice lands — tests must poll the notice, not the status.
 > - `HashMap.values()` iteration order is arbitrary — roster assertions look up by id, never by index.
 >
-> Architecture note: `LocalBus` lives in its own `harness-bus` crate (the binary crate can't be imported by integration tests; the crate map in `03-architecture.md` called for a `bus` crate anyway). One implementation serves embedded and daemon: children are fresh engines in fresh sessions, `builtins_base()` only (one level deep by construction), child approvals route to the parent's channel (TuiGate/WireGate) or run yolo in non-interactive modes (structural confinement still applies).
+> Architecture note: `LocalBus` lives in its own `hasp-bus` crate (the binary crate can't be imported by integration tests; the crate map in `03-architecture.md` called for a `bus` crate anyway). One implementation serves embedded and daemon: children are fresh engines in fresh sessions, `builtins_base()` only (one level deep by construction), child approvals route to the parent's channel (TuiGate/WireGate) or run yolo in non-interactive modes (structural confinement still applies).
 
 Implements `research/03-architecture.md` §8.2. 2026-09-19.
 

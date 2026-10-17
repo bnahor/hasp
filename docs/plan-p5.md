@@ -6,19 +6,19 @@ capability surface). 2026-09-19.
 > **Status: COMPLETE** (the consuming half of P5). 49 tests green (18 suites), fmt clean,
 > zero warnings, release build ok.
 >
-> Shipped: `harness-mcp` crate — stdio transport (newline-delimited JSON-RPC 2.0),
+> Shipped: `hasp-mcp` crate — stdio transport (newline-delimited JSON-RPC 2.0),
 > `initialize` → `notifications/initialized` → `tools/list` handshake, per-request 30s
 > timeout, `kill_on_drop` child, response routing by id with notifications ignored;
 > bridged tools named `mcp__<server>__<tool>` with schemas passed through; config merged
-> `~/.harness/mcp.json` ← `<root>/.harness/mcp.json` (project wins); wired into embedded
+> `~/.hasp/mcp.json` ← `<root>/.hasp/mcp.json` (project wins); wired into embedded
 > and daemon engines (root only — children keep `builtins_base()`, so the P3 containment
-> rule holds); `harness doctor` now lists configured servers and the tools they resolve to.
+> rule holds); `hasp doctor` now lists configured servers and the tools they resolve to.
 >
 > Verified: 5 tests — project-overrides-user + malformed-file-ignored (config merge),
 > handshake/tools-list/namespace-sort against a real child process, a full engine turn
 > whose tool call reaches the transcript with the server's text, `isError` → tool error,
 > and an unstartable server being skipped without failing startup. Plus a manual run of
-> the real binary (`harness doctor` in a project whose `mcp.json` points at the test
+> the real binary (`hasp doctor` in a project whose `mcp.json` points at the test
 > double) reporting `1 server(s) → 2 tool(s)`.
 >
 > Bug found while verifying: the footer's context estimate and the compaction threshold
@@ -36,18 +36,18 @@ touching this repo. Self-as-server can land later on the same transport.
 
 ## In
 
-- **New crate `harness-mcp`** — stdio transport, newline-delimited JSON-RPC 2.0
+- **New crate `hasp-mcp`** — stdio transport, newline-delimited JSON-RPC 2.0
   (same framing the wire crate already uses).
-- **Config** `mcp.json`, merged from `~/.harness/mcp.json` then
-  `<workspace>/.harness/mcp.json` (project wins on server-name collision):
+- **Config** `mcp.json`, merged from `~/.hasp/mcp.json` then
+  `<workspace>/.hasp/mcp.json` (project wins on server-name collision):
   ```json
   {"servers": {"name": {"command": "npx", "args": ["-y", "server"], "env": {"K": "V"}}}}
   ```
 - **Handshake**: spawn child with piped stdio, `initialize`
-  (`protocolVersion: 2024-11-05`, clientInfo `harness`), `notifications/initialized`,
+  (`protocolVersion: 2024-11-05`, clientInfo `hasp`), `notifications/initialized`,
   `tools/list`. Per-request timeout 30s; a failing server is skipped with a warning
   rather than blocking startup. Child is `kill_on_drop`.
-- **Bridging**: each remote tool becomes a `harness_core::Tool` named
+- **Bridging**: each remote tool becomes a `hasp_core::Tool` named
   `mcp__<server>__<tool>`, with the server's own description and input schema passed
   through unchanged. `tools/call` results are rendered to text; `isError` maps to
   `ToolOutput::is_error`.
@@ -57,10 +57,10 @@ touching this repo. Self-as-server can land later on the same transport.
 
 ## Out (tracked)
 
-- ~~Harness-as-MCP-server~~ **landed** (`harness --mcp-serve`): stdio server over the
+- ~~Harness-as-MCP-server~~ **landed** (`hasp --mcp-serve`): stdio server over the
   same `Tool` layer, so confinement and the bash rule apply unchanged; the gate is
   non-interactive, so writes/non-allowlisted commands are refused unless
-  `HARNESS_MCP_YOLO=1`. Covered by `cli/tests/mcp_server_e2e.rs`, which drives the
+  `HASP_MCP_YOLO=1`. Covered by `cli/tests/mcp_server_e2e.rs`, which drives the
   server with the harness's own MCP client.
 - MCP resources/prompts/sampling, SSE + HTTP transports,
   per-server enable/disable flags, hot reload, OAuth.

@@ -86,7 +86,7 @@ Legend: ✓ has it · ✗ does not · partial = has some of it.
    whose model list is discovered from the endpoint, so new models and new
    vendors need no code change (`docs/plan-p11-gaps.md`). Verified live against
    DeepSeek's OpenAI endpoint.
-2. Self-update once the repo has a remote (`harness update` reinstalling).
+2. Self-update once the repo has a remote (`hasp update` reinstalling).
 3. Session export/import commands — trivial over our JSONL.
 4. Themes/light mode (already planned Tier 1).
 5. Web research tool (fetch + read) behind the same gates.
@@ -100,7 +100,7 @@ Legend: ✓ has it · ✗ does not · partial = has some of it.
 
 Rows that changed for us:
 
-- **OS-level sandboxing**: ✗ → ✓ (`HARNESS_SANDBOX`: Seatbelt on macOS, bwrap on Linux).
+- **OS-level sandboxing**: ✗ → ✓ (`HASP_SANDBOX`: Seatbelt on macOS, bwrap on Linux).
 - **extensions / plugins / skills**: ✗ → ✓ for prompt templates, skills (progressive
   disclosure) and pre/post/stop hooks, `.claude/`-compatible. Still no compiled
   plugin API; MCP remains the tool-extension surface.

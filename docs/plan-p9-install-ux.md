@@ -5,7 +5,7 @@ Status: COMPLETE (2026-09-20)
 Everything verified with the real binary: `--version`/`-V`; doctor's install
 block (version, running binary, PATH membership, and the exact
 `cargo install --path …` command when running from `target/`);
-`cargo install --path crates/harness-cli` → `~/.cargo/bin/harness` → `--version`
+`cargo install --path crates/hasp-cli` → `~/.cargo/bin/harness` → `--version`
 → doctor `install: on PATH` → a one-shot from PATH in a fresh directory. The
 directory matrix (spaces, unicode, symlink → resolved target, 15-deep nesting,
 plain non-git) all pass embedded *and* through the daemon; a read-only directory
@@ -16,7 +16,7 @@ resident with history on screen.
 Two real defects found and fixed along the way:
 
 - `serve()` chmod'ed its socket's *parent* to 0700 — correct for directories it
-  created, but `HARNESS_SOCKET=/tmp/x.sock` tried to chmod `/tmp` itself and
+  created, but `HASP_SOCKET=/tmp/x.sock` tried to chmod `/tmp` itself and
   died with a bare `EPERM`. It now restricts only directories it created.
 - The daemon wrote a blank line after every message (`encode` already ends with
   `\n`, the writer added another). Our client skipped them; any other speaker
@@ -31,9 +31,9 @@ install/update "stupid easy, like pip"; the TUI clean.
 
 - **No `--version`.** A tool you can update needs to say what it is.
 - **`cargo install --path .` cannot work** — the repo root is a virtual
-  workspace, so the real command is `cargo install --path crates/harness-cli`.
+  workspace, so the real command is `cargo install --path crates/hasp-cli`.
   Untested until now; the README has no install section at all.
-- **`harness update` only refreshes the model catalog.** Fine — self-update
+- **`hasp update` only refreshes the model catalog.** Fine — self-update
   has nothing to pull from yet (no git remote, no releases) — but doctor should
   say how the binary got here and whether it is a dev build from `target/`.
 - **The TUI opens to a blank screen.** `WireBackend::spawn` prints
@@ -44,15 +44,15 @@ install/update "stupid easy, like pip"; the TUI clean.
 
 ## Plan
 
-1. `--version`/`-V` → `harness <semver>` from `CARGO_PKG_VERSION`.
+1. `--version`/`-V` → `hasp <semver>` from `CARGO_PKG_VERSION`.
 2. Doctor gains an install block: version, running binary path, whether that
    binary is reachable via `PATH`, and — when running from a `target/` dir —
    the exact `cargo install --path …` command to install properly.
-3. Verify `cargo install --path crates/harness-cli` end-to-end (build, install
-   into `~/.cargo/bin`, `harness --version` from PATH, a turn in a temp dir),
+3. Verify `cargo install --path crates/hasp-cli` end-to-end (build, install
+   into `~/.cargo/bin`, `hasp --version` from PATH, a turn in a temp dir),
    then document it in the README, including updating
-   (`git pull && cargo install --path crates/harness-cli`) and the model
-   catalog (`harness update --models`).
+   (`git pull && cargo install --path crates/hasp-cli`) and the model
+   catalog (`hasp update --models`).
 4. Any-directory matrix, mock provider: a plain non-git dir, a directory with
    spaces, unicode, a symlink, a deep path, `$HOME` itself, and a read-only
    directory (which must fail with a clean error, not a panic). One-shot `-p`

@@ -1,18 +1,18 @@
-# harness
+# hasp
 
-A personal agent harness. Research and architecture live in `research/`; the active implementation plan is `docs/plan-p0.md`.
+A personal agent hasp. Research and architecture live in `research/`; the active implementation plan is `docs/plan-p0.md`.
 
 ## Commands
 
 - `cargo test --workspace` — all crates
-- `cargo run -p harness-cli` — TUI (needs a key: env `ANTHROPIC_API_KEY`, `harness login`, or first-run prompt)
-- `cargo run -p harness-cli -- --plain` — line-REPL fallback
-- `cargo run -p harness-cli -- -p "do something" --yolo` — one-shot
-- `harness app` — the desktop app (sidebar, conversation, changes pane) over the daemon
-- `harness review [new|edit|send|approve --land]` — review agent work in $EDITOR
-- `harness providers` · `harness --provider kimi` — coding plans on our engine
-- `harness agents` · `harness --agent claude|codex|gemini|opencode` — drive a vendor CLI on the user's own plan
-- `harness login` · `harness doctor` · `harness update --models` (fetches models.dev)
+- `cargo run -p hasp-cli` — TUI (needs a key: env `ANTHROPIC_API_KEY`, `hasp login`, or first-run prompt)
+- `cargo run -p hasp-cli -- --plain` — line-REPL fallback
+- `cargo run -p hasp-cli -- -p "do something" --yolo` — one-shot
+- `hasp app` — the desktop app (sidebar, conversation, changes pane) over the daemon
+- `hasp review [new|edit|send|approve --land]` — review agent work in $EDITOR
+- `hasp providers` · `hasp --provider kimi` — coding plans on our engine
+- `hasp agents` · `hasp --agent claude|codex|gemini|opencode` — drive a vendor CLI on the user's own plan
+- `hasp login` · `hasp doctor` · `hasp update --models` (fetches models.dev)
 
 ## Invariants (do not break these in contributions)
 

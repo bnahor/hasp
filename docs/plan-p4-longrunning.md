@@ -25,7 +25,7 @@ Implements `research/03-architecture.md` §8.3 (Prime-derived semantics). 2026-0
 - **Wire methods**: `goal/set`, `goal/status`, `autonomous/set`, `heartbeat/set`, `heartbeat/list` — same JSON shapes served by the engine backend (reference impl) and daemon.
 - `post_turn_check()` is one shared engine method; all three callers loop it (daemon prompt task, TUI backend, plain/-p path).
 
-**Out (tracked):** cron expressions (interval + one-shot delay only), agent-created heartbeats, worktree cleanup sweeps, gate-rerun dedup on unchanged workspace, goals/heartbeats surfaces in `harness -p`.
+**Out (tracked):** cron expressions (interval + one-shot delay only), agent-created heartbeats, worktree cleanup sweeps, gate-rerun dedup on unchanged workspace, goals/heartbeats surfaces in `hasp -p`.
 
 ## Verification
 

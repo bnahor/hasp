@@ -5,15 +5,15 @@ clean. Verified live with DeepSeek V4.1 Flash and in a real Docker e2e.
 
 ## What exists
 
-- **Guest agent (step 2).** `harness --mcp-serve`, now concurrent (each
+- **Guest agent (step 2).** `hasp --mcp-serve`, now concurrent (each
   `tools/call` is a task; replies share one writer) and cancellable
   (`notifications/cancelled` aborts the call; dropping a tool's future kills
   its command's process group; a disconnected client aborts everything). The
   MCP client has per-client call timeouts and sends `notifications/cancelled`
   for any call it abandons (dropped future or timeout). `--guest-idle` is the
   container's main process, so no image needs `sleep` or a shell.
-- **`harness-env` (step 1).**
-  - `EnvSpec` (`.harness/environments/<name>.toml`, home fallback): image,
+- **`hasp-env` (step 1).**
+  - `EnvSpec` (`.hasp/environments/<name>.toml`, home fallback): image,
     platform, cpus, memory, pids, network none|full, env, setup; validated.
   - `Backend`/`Instance` traits. The only thing the rest of the harness needs
     from an instance is `guest_command()`: a command whose stdio reaches the
@@ -24,12 +24,12 @@ clean. Verified live with DeepSeek V4.1 Flash and in a real Docker e2e.
     `harness.env/workspace/pid`, host uid on Linux.
   - Proxy tools for `ENV_TOOLS`, same names/schemas, host gate first,
     same concurrency flags as the local tools.
-  - Guest binary selection by ELF machine: `HARNESS_GUEST_BINARY`,
-    `~/.harness/guest/`, or the running binary on a same-arch Linux host.
-- **Wiring.** `--env` / `HARNESS_ENV` (embedded, `-p`, REPL, daemon via the
+  - Guest binary selection by ELF machine: `HASP_GUEST_BINARY`,
+    `~/.hasp/guest/`, or the running binary on a same-arch Linux host.
+- **Wiring.** `--env` / `HASP_ENV` (embedded, `-p`, REPL, daemon via the
   session-open `environment` param); `spawn`/`subagent` `environment`, with
   inheritance from the parent; `agents` and spawn results name the instance;
-  `harness env list|check|prune|build-guest`; `doctor` line.
+  `hasp env list|check|prune|build-guest`; `doctor` line.
 
 ## Evidence
 

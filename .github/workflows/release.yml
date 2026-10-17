@@ -32,9 +32,9 @@ jobs:
         shell: bash
         run: |
           set -eu
-          name="harness-${{ matrix.target }}"
+          name="hasp-${{ matrix.target }}"
           mkdir -p "dist/$name"
-          cp "target/${{ matrix.target }}/release/harness" "dist/$name/"
+          cp "target/${{ matrix.target }}/release/hasp" "dist/$name/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           (cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256.txt")
       - uses: softprops/action-gh-release@v2

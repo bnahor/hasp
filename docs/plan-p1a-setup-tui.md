@@ -9,11 +9,11 @@ Closes the parity gap with the studied agents (pi, Claude Code, Grok Build, Prim
 ## Scope
 
 **In:**
-- Credentials: `harness login` (hidden-input prompt, stores to `~/.harness/credentials.json`, 0600); resolution order env `ANTHROPIC_API_KEY` → file → first-run prompt. Shape leaves room for OAuth tokens later.
-- Model catalog: bundled fallback (ids + windows) + `harness update --models` fetching `https://models.dev/api.json` (codegraff's source) into `~/.harness/models.json`; `/model <id>` switching (appends `model_change` entries); footer shows context vs. the *actual* model window; cost line when the catalog carries prices.
+- Credentials: `hasp login` (hidden-input prompt, stores to `~/.hasp/credentials.json`, 0600); resolution order env `ANTHROPIC_API_KEY` → file → first-run prompt. Shape leaves room for OAuth tokens later.
+- Model catalog: bundled fallback (ids + windows) + `hasp update --models` fetching `https://models.dev/api.json` (codegraff's source) into `~/.hasp/models.json`; `/model <id>` switching (appends `model_change` entries); footer shows context vs. the *actual* model window; cost line when the catalog carries prices.
 - TUI (ratatui + crossterm, alternate screen): streaming scrollback, multi-line input editor (Ctrl+J newline), input history (↑/↓), message queue while a turn runs, status footer (model · ctx · cache R/W · cost · session), tool notes, in-UI permission prompts (y/a/n), scrolling (PgUp/PgDn), `/exit /new /name /stats /model /resume /clear /help`.
 - `/resume`: session lister (id, name, created, entry count) + `/resume <n>` reopen.
-- `harness doctor`: key present, git present, sessions/trace dirs writable, catalog source + model count.
+- `hasp doctor`: key present, git present, sessions/trace dirs writable, catalog source + model count.
 - `--plain` retains the P0 line REPL for pipes/debugging.
 
 **Out (tracked as remaining parity debt):**
@@ -25,7 +25,7 @@ Closes the parity gap with the studied agents (pi, Claude Code, Grok Build, Prim
 ## Verification
 
 - `cargo test --workspace`: catalog parse (fallback + fetched-shape fixture), credentials roundtrip + perms, session lister, `model_change` entry roundtrip.
-- Manual: `harness login`, `harness doctor`, TUI run incl. queued messages, `/model`, `/resume`, approval prompts, footer cache/cost.
+- Manual: `hasp login`, `hasp doctor`, TUI run incl. queued messages, `/model`, `/resume`, approval prompts, footer cache/cost.
 
 ## Notable design points
 

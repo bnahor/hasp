@@ -55,7 +55,7 @@ Done in this pass:
 - [x] streaming message rendered as markdown each frame (fences snap in)
 - [x] footer: context-pressure bar (green→yellow→red), busy spinner, queue
       depth, cache R/W, cost, scroll indicator
-- [x] `--ascii` / `HARNESS_ASCII` for terminals that misrender `▪ ▶ ✓ ─`
+- [x] `--ascii` / `HASP_ASCII` for terminals that misrender `▪ ▶ ✓ ─`
 
 Next, roughly in value order:
 
@@ -65,7 +65,7 @@ Next, roughly in value order:
       filtered by the token under the caret, tab inserts)
 - [x] syntax highlighting inside code blocks (dependency-free: keywords, strings,
       numbers, comments; block comments span lines)
-- [x] real diffs from `write`/`edit` (new `harness-tools::diff`, returned in tool output)
+- [x] real diffs from `write`/`edit` (new `hasp-tools::diff`, returned in tool output)
 - [x] collapsible tool and reasoning blocks (ctrl+o toggles the newest; collapsed
       bodies show 6 lines plus `… N more line(s)`)
 - [x] reasoning streamed as its own event (dim italic, then kept in the

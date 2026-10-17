@@ -435,183 +435,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "harness-agents"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "harness-diff",
- "harness-workspace",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "harness-bus"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "harness-core",
- "harness-env",
- "harness-provider",
- "harness-tools",
- "harness-workspace",
- "tempfile",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "harness-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "harness-agents",
- "harness-bus",
- "harness-core",
- "harness-env",
- "harness-mcp",
- "harness-provider",
- "harness-review",
- "harness-tools",
- "harness-wire",
- "harness-workspace",
- "portable-pty",
- "ratatui",
- "rpassword",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "unicode-width 0.2.0",
-]
-
-[[package]]
-name = "harness-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "base64",
- "futures-util",
- "harness-provider",
- "harness-tools",
- "harness-workspace",
- "libc",
- "regex",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.20",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "harness-diff"
-version = "0.1.0"
-dependencies = [
- "imara-diff",
-]
-
-[[package]]
-name = "harness-env"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "harness-core",
- "harness-mcp",
- "harness-workspace",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "toml",
- "uuid",
-]
-
-[[package]]
-name = "harness-mcp"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "harness-core",
- "harness-provider",
- "harness-tools",
- "harness-workspace",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "harness-provider"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "futures-util",
- "harness-core",
- "harness-workspace",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "harness-review"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "harness-diff",
- "serde",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "harness-tools"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "globset",
- "harness-core",
- "harness-diff",
- "harness-workspace",
- "ignore",
- "regex",
- "reqwest",
- "serde_json",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "harness-wire"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "harness-workspace"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.20",
-]
-
-[[package]]
 name = "hashbrown"
 version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -627,6 +450,184 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+
+[[package]]
+name = "hasp-agents"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "hasp-diff",
+ "hasp-workspace",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "hasp-bus"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "hasp-core",
+ "hasp-env",
+ "hasp-provider",
+ "hasp-tools",
+ "hasp-workspace",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "hasp-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hasp-agents",
+ "hasp-bus",
+ "hasp-core",
+ "hasp-env",
+ "hasp-mcp",
+ "hasp-provider",
+ "hasp-review",
+ "hasp-tools",
+ "hasp-wire",
+ "hasp-workspace",
+ "portable-pty",
+ "ratatui",
+ "rpassword",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "unicode-width 0.2.0",
+]
+
+[[package]]
+name = "hasp-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64",
+ "futures-util",
+ "hasp-provider",
+ "hasp-tools",
+ "hasp-workspace",
+ "libc",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "hasp-diff"
+version = "0.1.0"
+dependencies = [
+ "imara-diff",
+]
+
+[[package]]
+name = "hasp-env"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "hasp-core",
+ "hasp-mcp",
+ "hasp-workspace",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml",
+ "uuid",
+]
+
+[[package]]
+name = "hasp-mcp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "hasp-core",
+ "hasp-provider",
+ "hasp-tools",
+ "hasp-workspace",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "hasp-provider"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "hasp-core",
+ "hasp-workspace",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "hasp-review"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hasp-diff",
+ "hasp-workspace",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "hasp-tools"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "globset",
+ "hasp-core",
+ "hasp-diff",
+ "hasp-workspace",
+ "ignore",
+ "regex",
+ "reqwest",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "hasp-wire"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "hasp-workspace"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+]
 
 [[package]]
 name = "heck"

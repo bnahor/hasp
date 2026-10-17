@@ -55,7 +55,7 @@ by the checklist below.
   as text, never interpreted as HTML. Missing/inaccessible files surface errors.
 - Browsing uses `Workspace::confine`: relative paths only, no parent traversal,
   no symlink escape. New endpoints use the existing server token guard.
-- Skills discovery uses the engine's existing `.harness/skills` and
+- Skills discovery uses the engine's existing `.hasp/skills` and
   `.claude/skills` precedence. The catalog exposes names/descriptions only.
   Discovery can create the harness home directory via the existing helper;
   it does not write skill files. An engine snapshots available skills when

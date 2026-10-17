@@ -1,0 +1,32 @@
+[package]
+name = "hasp-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "hasp"
+path = "src/main.rs"
+
+[dependencies]
+hasp-agents = { workspace = true }
+hasp-bus = { workspace = true }
+hasp-core = { workspace = true }
+hasp-env = { workspace = true }
+hasp-mcp = { workspace = true }
+hasp-provider = { workspace = true }
+hasp-review = { workspace = true }
+hasp-tools = { workspace = true }
+hasp-wire = { workspace = true }
+hasp-workspace = { workspace = true }
+anyhow = { workspace = true }
+ratatui = "0.29"
+rpassword = "7"
+serde = { workspace = true }
+serde_json = { workspace = true }
+unicode-width = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+portable-pty = "0.8"
+tempfile = "3"

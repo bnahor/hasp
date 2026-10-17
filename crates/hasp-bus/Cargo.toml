@@ -1,0 +1,18 @@
+[package]
+name = "hasp-bus"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+hasp-core = { workspace = true }
+hasp-env = { workspace = true }
+hasp-tools = { workspace = true }
+hasp-workspace = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+hasp-provider = { workspace = true }
+tempfile = "3"

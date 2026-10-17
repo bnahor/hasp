@@ -47,7 +47,7 @@ def session(rt, script):
     t0 = time.time()
     p = subprocess.run(["harness", "--provider", "mock", "--env", "b", "-p", "go", "--yolo"],
                        cwd=ws, capture_output=True, text=True,
-                       env=dict(os.environ, HARNESS_MOCK_SCRIPT=json.dumps(script)))
+                       env=dict(os.environ, HASP_MOCK_SCRIPT=json.dumps(script)))
     return time.time() - t0, p.stdout + p.stderr
 
 def run_rep(rt, rep):

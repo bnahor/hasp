@@ -1,9 +1,11 @@
 /target
+.hasp/
 .harness/
 __pycache__/
 .DS_Store
 bench/swebench/.venv/
 bench/swebench/harness-linux-amd64
+bench/swebench/hasp-linux-amd64
 bench/swebench/verified.jsonl
 bench/swebench/runs/
 bench/swebench/logs/
@@ -12,6 +14,7 @@ bench/swebench/build.log
 bench/swebench/claude-linux-*
 bench/terminalbench/claude-linux-*
 bench/terminalbench/harness-linux-*
+bench/terminalbench/hasp-linux-*
 bench/terminalbench/.venv/
 bench/terminalbench/runs/
 bench/terminalbench/*.log

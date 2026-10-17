@@ -8,7 +8,7 @@ macOS 27.0, rustc 1.98.1, release build) unless noted. Reproduce with
 
 | measurement | result |
 | --- | --- |
-| `harness --version` process startup | 3 ms median (n=20) |
+| `hasp --version` process startup | 3 ms median (n=20) |
 | one-shot turn end to end, fresh session | **39 ms median** (n=20, min 36 / max 45) |
 | same, continuing a 2.1 MB / 4,000-entry journal | **52 ms median** (+13 ms to load, validate and assemble) |
 | daemon `session/stats` on that session | 3.1 ms median |
@@ -27,7 +27,7 @@ datum, not just a benchmark one.
 ## 2. HumanEval through the harness
 
 The full public suite (164 problems, OpenAI, MIT) run as one-shots:
-`harness -p` per problem, fresh temp workspace each (identical system prompt
+`hasp -p` per problem, fresh temp workspace each (identical system prompt
 everywhere), `deepseek-v4-pro` with its default thinking enabled, six workers,
 150 s per problem. Candidates extracted from the last fenced block and judged
 against each problem's own canonical tests in a sandboxed subprocess (10 s).

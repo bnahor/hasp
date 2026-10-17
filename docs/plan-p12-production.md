@@ -5,7 +5,7 @@ Status: tranches 1, 3a and 5 COMPLETE (2026-09-20); 2, 3b and 4 remain
 Landed and verified:
 
 - **1. Robustness** — retry/backoff with `Retry-After` (before anything streams
-  only), stream stall guard, catalog staleness refresh, `harness sessions
+  only), stream stall guard, catalog staleness refresh, `hasp sessions
   [list|rm|prune]` with the live-resident guard, failing schedules backing off
   (cron keeps its wall clock). 11 new tests, including two fake-endpoint tests
   and one that a stray `content-length` would have made vacuous.
@@ -29,8 +29,8 @@ Landed and verified:
   conformance-audited (`jsonrpc` is not validated, no `available_commands_update`,
   client `fs/*` unused); the daemon is unix-socket only, so a TCP listener with a
   required token is still missing.
-- **4. Sandbox and extension surface.** `HARNESS_SANDBOX` (sandbox-exec/bwrap
-  wrapping for bash) and project prompt templates in `.harness/commands/*.md`
+- **4. Sandbox and extension surface.** `HASP_SANDBOX` (sandbox-exec/bwrap
+  wrapping for bash) and project prompt templates in `.hasp/commands/*.md`
   are both unstarted — the largest remaining piece, and deliberately not
   rushed.
 
@@ -46,7 +46,7 @@ Landed and verified:
 - **Catalog staleness**: on startup, refresh the models.dev catalog in the
   background when the stored copy is older than a week. Keeps `--model`
   validation and pricing current without a manual command.
-- **`harness sessions [list|rm <id>|prune --older-than D|--keep N]`**: sessions
+- **`hasp sessions [list|rm <id>|prune --older-than D|--keep N]`**: sessions
   are files nobody could clean up. Deletion refuses ids that a live daemon
   resident holds (new `session/residents` wire method), because unlinking a file
   a daemon is appending to loses that data silently.
@@ -78,7 +78,7 @@ turn (mock delay) is in flight.
   updates; a permission question goes to all and the first answer wins.
 - **Strict ACP framing**: require `jsonrpc: "2.0"` (else -32600), ACP-shaped
   error codes, and `available_commands_update` after `session/new`.
-- **TCP transport**: an optional `HARNESS_TCP=host:port` listener beside the
+- **TCP transport**: an optional `HASP_TCP=host:port` listener beside the
   unix socket, with a required token (a TCP socket is reachable by other local
   processes, so the unix socket's filesystem permissions no longer protect it).
 
@@ -88,11 +88,11 @@ and a rejected bad token.
 
 ## 4. Sandbox and extension surface
 
-- **Sandbox**: `HARNESS_SANDBOX=off|workspace-write|read-only` wraps `bash`
+- **Sandbox**: `HASP_SANDBOX=off|workspace-write|read-only` wraps `bash`
   commands in the platform sandbox (macOS `sandbox-exec`, Linux `bwrap`) with a
   profile that permits the workspace and denies the rest, degrading to a clear
   refusal when the tool is missing rather than pretending.
-- **Extensions, first slice**: project prompt templates in `.harness/commands/*.md`
+- **Extensions, first slice**: project prompt templates in `.hasp/commands/*.md`
   exposed as `/name` everywhere a command runs, with `$ARGUMENTS` substitution —
   the smallest extension point that is genuinely useful, and the seam the rest
   (hooks, tool plugins) grows from.

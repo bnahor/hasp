@@ -4,10 +4,10 @@ Tracker for the remaining roadmap items. 2026-09-20.
 
 ## Done
 
-- **Harness as an MCP server** (`harness --mcp-serve`). Stdio MCP over the same
+- **Harness as an MCP server** (`hasp --mcp-serve`). Stdio MCP over the same
   `Tool` layer, so workspace confinement and the bash metacharacter rule apply
   unchanged; the gate is non-interactive, so writes and non-allowlisted
-  commands are refused unless `HARNESS_MCP_YOLO=1`. Verified by
+  commands are refused unless `HASP_MCP_YOLO=1`. Verified by
   `cli/tests/mcp_server_e2e.rs`, which drives the server with the harness's own
   MCP client and checks the refusals leave nothing on disk.
 - **Context accounting: measured, not guessed.** `SessionManager::last_input_tokens`
@@ -49,9 +49,9 @@ seconds and exits when it is gone; covered by
   its answer (default 300s, then it points at the notice and lets the parent carry
   on). `spawn` remains the default recommendation — this is for when the next step
   depends on the result. Tests cover both the inline report and the timeout.
-- ~~Worktree cleanup sweeps~~ **landed**: `harness worktrees` lists the child
+- ~~Worktree cleanup sweeps~~ **landed**: `hasp worktrees` lists the child
   worktrees with their branch and whether that branch is already contained in
-  `HEAD`; `harness worktrees prune <name>` removes a merged one and *refuses* an
+  `HEAD`; `hasp worktrees prune <name>` removes a merged one and *refuses* an
   unmerged one unless `--force`, whose message says exactly what is at stake. The
   branch is always kept, so even a forced prune leaves the child's commits
   recoverable. Verified with the real binary: merged → prune, unmerged → refused
@@ -73,7 +73,7 @@ run (DeepSeek, ~$0.10 total):
   the child server over stdio, and `echoed: hello from mcp` came back into the
   transcript.
 - **Worktree session**: `/worktree demo` then a real turn wrote `made.txt` inside
-  `.harness/worktrees/demo/` while the main checkout stayed clean — isolation
+  `.hasp/worktrees/demo/` while the main checkout stayed clean — isolation
   held with a live model driving the tools.
 
 No defects surfaced in these three runs; the bugs they were expected to find

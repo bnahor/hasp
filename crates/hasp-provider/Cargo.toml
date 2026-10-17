@@ -1,0 +1,18 @@
+[package]
+name = "hasp-provider"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+hasp-core = { workspace = true }
+hasp-workspace = { workspace = true }
+async-trait = { workspace = true }
+futures-util = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

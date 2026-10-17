@@ -22,9 +22,9 @@ clean. Verified live on DeepSeek V4 Pro (no Anthropic key on this machine; see
 ## Added
 
 - `grep`, `glob` (ripgrep's `ignore`/`globset`, in process), `todo`, `skill`.
-- Prompt templates, skills and hooks (`crates/harness-core/src/{extensions,hooks}.rs`),
-  `.claude/` layout compatible; `harness trust` gates project hooks.
-- `HARNESS_SANDBOX` (`crates/harness-tools/src/sandbox.rs`): Seatbelt / bwrap,
+- Prompt templates, skills and hooks (`crates/hasp-core/src/{extensions,hooks}.rs`),
+  `.claude/` layout compatible; `hasp trust` gates project hooks.
+- `HASP_SANDBOX` (`crates/hasp-tools/src/sandbox.rs`): Seatbelt / bwrap,
   refuses rather than degrade; the real Seatbelt test runs on macOS.
 - System prompt: tool-use guidance (search tools, parallel calls, todo). Static
   text, so byte-stability holds.
@@ -33,7 +33,7 @@ clean. Verified live on DeepSeek V4 Pro (no Anthropic key on this machine; see
 
 - 3-sample search task: model batched `grep, grep, glob` into one sample;
   cache reads 0 → 2432 → 2944 tokens; signed thinking replayed without error.
-- `-p "/fix calc.py"` with `HARNESS_SANDBOX=workspace-write`: template expanded,
+- `-p "/fix calc.py"` with `HASP_SANDBOX=workspace-write`: template expanded,
   model loaded the matching skill and followed it, fixed the bug, verified by
   running Python in the sandbox. 4 samples, 9216/12465 input from cache, $0.006.
 
@@ -69,7 +69,7 @@ clean. Verified live on DeepSeek V4 Pro (no Anthropic key on this machine; see
 
 ## Still open
 
-- Project `.harness/mcp.json` starts servers without `harness trust` — the same
+- Project `.hasp/mcp.json` starts servers without `hasp trust` — the same
   code-execution concern hooks now guard against. Gating it changes existing
   behavior, so it is left for a deliberate decision.
 - Strict ACP framing + TCP transport (P12 3b); `available_commands_update` could

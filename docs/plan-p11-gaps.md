@@ -4,7 +4,7 @@ Status: COMPLETE (2026-09-20) — all eight items
 
 Item 1 verified three ways: unit + fake-endpoint e2e tests (fragmented tool
 deltas, usage, the 400-on-`stream_options` retry), live discovery against
-DeepSeek's OpenAI endpoint (`harness models compat` → the two models it serves),
+DeepSeek's OpenAI endpoint (`hasp models compat` → the two models it serves),
 and a live turn through the real harness (`--provider compat --model
 deepseek-v4-pro` → "OK", $0.002, usage reported).
 
@@ -19,42 +19,42 @@ Three layers:
 - **Ollama provider** — local models, and the model list is *discovered at
   runtime* from `/api/tags`, so `ollama pull anything` shows up with no code
   change. This is the proof of the principle.
-- **Generic Anthropic-compatible provider** — `HARNESS_COMPAT_URL` (plus key)
+- **Generic Anthropic-compatible provider** — `HASP_COMPAT_URL` (plus key)
   turns any new vendor into `--provider compat` without a recompile.
 - **Catalog auto-refresh** — the models.dev catalog is fetched on demand when
-  stale instead of only via `harness update --models`, and `--model` accepts any
+  stale instead of only via `hasp update --models`, and `--model` accepts any
   id the catalog lists for the active provider.
 
 ## 2. Self-update — done
 
-`git init` + initial commit (427d49c), then `harness update`: rebuilds and
+`git init` + initial commit (427d49c), then `hasp update`: rebuilds and
 reinstalls from the checkout it runs in (walking up from the executable, so
 `target/debug` and `target/release` both resolve), remembers that checkout in
-`~/.harness/checkout`, and an installed binary with no checkout beside it
-updates from the remembered path. `harness update --models` unchanged. Verified
+`~/.hasp/checkout`, and an installed binary with no checkout beside it
+updates from the remembered path. `hasp update --models` unchanged. Verified
 live in all three positions: dev binary, PATH binary with remembered checkout,
 and a stray copy with neither (clean error naming the cargo command).
 
 ## 3. Session export/import
 
-`harness export [session-id] > file` and `harness import file` over the
+`hasp export [session-id] > file` and `hasp import file` over the
 append-only JSONL that already *is* the format — no new serialization, just a
 command surface (plus what opencode charges for and we get free: portability).
 
 ## 4. Themes / light mode
 
-A palette struct behind the TUI's color choices, `HARNESS_THEME=light|dark` and
+A palette struct behind the TUI's color choices, `HASP_THEME=light|dark` and
 `/theme`, with a light palette that keeps the markdown/highlight hierarchy.
 
 ## 3–6 — done
 
-- **export/import**: `harness export [id]` streams the journal, `harness import
+- **export/import**: `hasp export [id]` streams the journal, `hasp import
   <file>` validates every line, files the session under the workspace its header
   names (path-derived key when that workspace only exists on another machine),
   and refuses to overwrite. Covered by a round-trip test across two HOME states.
 - **themes**: one `Theme` struct feeds every content color (transcript kinds,
   markdown, syntax, diffs); `/theme light|dark` switches at runtime and
-  `HARNESS_THEME` sets the default. Dark is byte-identical to the old look.
+  `HASP_THEME` sets the default. Dark is byte-identical to the old look.
 - **web_fetch**: read-only research behind structural egress rules — http(s)
   only, loopback/private/link-local/metadata names and IPs refused outright
   (verified live: example.com fetched in 57 ms, `169.254.169.254` refused in
@@ -69,13 +69,13 @@ A palette struct behind the TUI's color choices, `HARNESS_THEME=light|dark` and
 
 ## 7–8 — done
 
-- **ACP** (`harness --acp`): a translation layer over the daemon, so an editor
+- **ACP** (`hasp --acp`): a translation layer over the daemon, so an editor
   session inherits resident sessions, MCP tools, journals and gates. Streaming
   updates, journal replay on `session/load`, and approvals as
   `session/request_permission`. Covered by `acp_e2e`: a real turn through a real
   editor-side client, a second turn on the same session, and an approval the
   editor refuses (asserting the command did not run).
-- **Web UI** (`harness web [port]`): one embedded page, hand-rolled HTTP over a
+- **Web UI** (`hasp web [port]`): one embedded page, hand-rolled HTTP over a
   daemon connection, SSE for streamed updates, token-guarded, localhost only.
   Covered by `web_e2e`: 401 without the token, page served with it, a real prompt
   through `/rpc`, history replay, and deltas arriving on the event stream while a

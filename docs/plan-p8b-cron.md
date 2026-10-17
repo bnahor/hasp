@@ -27,7 +27,7 @@ the platform reports for each queried instant.
 
 ## Shape
 
-- `harness-core/src/cron.rs`: pure parser + matcher (bitset fields), plus
+- `hasp-core/src/cron.rs`: pure parser + matcher (bitset fields), plus
   `next_due` — a minute-stepped search bounded at 366 days, returning `None`
   for schedules with no occurrence in that window (e.g. Feb 29 far away), which
   the runtime treats as "not due".

@@ -23,7 +23,7 @@ import os
 import shlex
 from pathlib import Path
 
-BINARY = Path(os.environ.get("HARNESS_FH_BINARY", "/work/harness/target/fh/release/harness"))
+BINARY = Path(os.environ.get("HASP_FH_BINARY", "/work/harness/target/fh/release/hasp"))
 VERSION_FILE = BINARY.parent / "harness.version"
 
 # eval provider prefix -> (harness --provider, key variable, host)
@@ -35,7 +35,7 @@ PROVIDERS = {
 # get it too, so the agent's TLS to the provider validates.
 HOST_CA = Path("/etc/ssl/certs/ca-certificates.crt")
 REMOTE_CA = "/tmp/harness-ca-bundle.crt"
-REMOTE_BIN = "/usr/local/bin/harness"
+REMOTE_BIN = "/usr/local/bin/hasp"
 OUT, ERR, DONE = "/tmp/harness.out", "/tmp/harness.err", "/tmp/harness.exit"
 POLL_SECONDS = 10
 
@@ -112,7 +112,7 @@ class HarnessAgentMixin:
     async def _collect(self, environment, context, logs: Path) -> None:
         """Copy the newest session journal out and record its usage."""
         found = await environment.exec(
-            command='ls -t "$HOME"/.harness/sessions/*/*.jsonl 2>/dev/null | head -1'
+            command='ls -t "$HOME"/.hasp/sessions/*/*.jsonl 2>/dev/null | head -1'
         )
         journal = (found.stdout or "").strip()
         if not journal:

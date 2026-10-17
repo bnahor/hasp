@@ -85,7 +85,7 @@ Other findings on the way:
   Docker).
 - The guest-agent handshake allows 300 s: the first exec into a freshly
   booted microVM exceeded the 30 s MCP default.
-- `harness env check` detects networking by default route
+- `hasp env check` detects networking by default route
   (`/proc/net/route`): interface listings are wrong under gVisor (no
   `/sys/class/net`) and noisy under Docker Desktop (dormant tunnel devices).
 

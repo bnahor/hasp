@@ -1,53 +1,65 @@
-# harness
+# hasp
 
 A personal coding agent: a TUI attached to a daemon that owns one workspace at a
 time, sessions as append-only JSONL, prompt-cache-disciplined requests, and a
 lightweight agent bus for spawning child agents.
 
 ```sh
-cargo build --release          # binary at target/release/harness
+cargo build --release          # binary at target/release/hasp
 ```
+
+## Renamed from `harness`
+
+This project was called `harness` until October 2026. On first run `hasp`
+copies its own files from `~/.harness` (sessions, credentials, provider,
+agent, MCP and hook config, skills, commands) into `~/.hasp` and leaves the
+originals in place — `~/.harness` is shared with other tools, so it is never
+moved. Projects keep working: `.harness/` worktrees, reviews, skills and
+config are still read (new state goes to `.hasp/`), `harness/<name>`
+worktree branches are still found, `HARNESS_*` environment variables still
+work (`HASP_*` wins when both are set), and `HARNESS.md` is still read.
+Rebuild the container guest agent once with `hasp env build-guest`.
 
 ## Quickstart
 
 ```sh
-cargo install --path crates/harness-cli   # from a checkout → ~/.cargo/bin/harness
-harness --version                         # → harness 0.1.0
-harness login                  # Anthropic key → ~/.harness/credentials.json (0600)
-harness login deepseek         # …or DeepSeek (Anthropic-compatible endpoint, 1M ctx)
-harness login zai              # …or a z.ai / GLM coding-plan key
-harness doctor                 # what's configured, what's missing
+cargo install --path crates/hasp-cli   # from a checkout → ~/.cargo/bin/hasp
+hasp --version                         # → hasp 0.1.0
+hasp login                  # Anthropic key → ~/.hasp/credentials.json (0600)
+hasp login deepseek         # …or DeepSeek (Anthropic-compatible endpoint, 1M ctx)
+hasp login zai              # …or a z.ai / GLM coding-plan key
+hasp doctor                 # what's configured, what's missing
 
-harness                        # TUI (auto-spawns the daemon and attaches)
-harness --plain                # line REPL, embedded (no daemon)
-harness -p "explain src/lib.rs"  # one-shot, prints the answer
-harness --provider mock        # keyless: echoes prompts, for poking at the UI
+hasp                        # TUI (auto-spawns the daemon and attaches)
+hasp --plain                # line REPL, embedded (no daemon)
+hasp -p "explain src/lib.rs"  # one-shot, prints the answer
+hasp --provider mock        # keyless: echoes prompts, for poking at the UI
 
-harness app                    # the desktop app, in its own window
-harness web                    # the same app on 127.0.0.1 (prints a token URL)
-harness --acp                  # Agent Client Protocol on stdio — editors (Zed, …) drive it
-harness --mcp-serve            # serve the same tools over MCP on stdio
+hasp app                    # the desktop app, in its own window
+hasp web                    # the same app on 127.0.0.1 (prints a token URL)
+hasp --acp                  # Agent Client Protocol on stdio — editors (Zed, …) drive it
+hasp --mcp-serve            # serve the same tools over MCP on stdio
 ```
 
 The install command is the whole story: the root of this repo is a virtual
-workspace, so point `cargo install` at `crates/harness-cli` (not `.`). After
-that, `harness update` rebuilds and reinstalls from the checkout (remembered
-in `~/.harness/checkout`, so it works from the installed binary too),
-`harness update --models` refreshes the model catalog, and `harness doctor`
+workspace, so point `cargo install` at `crates/hasp-cli` (not `.`). After
+that, `hasp update` rebuilds and reinstalls from the checkout (remembered
+in `~/.hasp/checkout`, so it works from the installed binary too),
+`hasp update --models` refreshes the model catalog, and `hasp doctor`
 always shows the running binary's path and whether it is the one on `PATH`.
 
 Inside the TUI:
 
 | command | what it does |
 | --- | --- |
-| `/goal <text> [--budget N\|--unlimited]` | persistent objective; the harness keeps prompting itself until the model calls `goal_complete`. Defaults to a 2M-token budget |
+| `/goal <text> [--budget N\|--unlimited]` | persistent objective; the hasp keeps prompting itself until the model calls `goal_complete`. Defaults to a 2M-token budget |
 | `/goal status\|pause\|resume\|clear` | as you'd expect |
 | `/autonomous on [--max-turns N] [--max-tokens N] [--gate "cmd"]` | keep working until the gate command passes or a limit trips |
 | `/heartbeat every 10m <text>` | recurring nudge; `in 30m <text>` one-shot; `cron 0 9 * * 1-5 <text>` wall-clock, local time; `list`, `pause`, `resume`, `clear` |
 | `/compact`, `/branch [n]`, `/fork`, `/resume [n]` | context and session control |
 | `/worktree [name]`, `/worktree-exit [rm]` | isolate the session in a git worktree |
 | `/model [id]`, `/stats`, `/name <text>`, `/new`, `/clear`, `/exit` | the rest |
-| `/theme light\|dark` | color palette (`HARNESS_THEME` sets the default); dark is the historical look |
+| `/theme light\|dark` | color palette (`HASP_THEME` sets the default); dark is the historical look |
 
 Any `/name` that is not built in runs a prompt template (below); they show in
 `/help` and tab-completion.
@@ -88,26 +100,26 @@ is attached to the prompt and the path in the text becomes `[image 1: …]`.
 return images pass them through, `--mcp-serve` returns them, and ACP editors
 can send image blocks. Images over 3.75 MB are downscaled with `sips` (macOS)
 or ImageMagick. Models that cannot see images (DeepSeek, text-only GLM,
-`HARNESS_COMPAT_VISION=off`) get a placeholder instead of an error, so a
+`HASP_COMPAT_VISION=off`) get a placeholder instead of an error, so a
 session with an image in it keeps working after a model switch.
 
 ## Commands, skills and hooks
 
 Plain files, laid out so an existing Claude Code collection works unchanged.
-Project beats home, `.harness` beats `.claude`:
+Project beats home, `.hasp` beats `.claude`:
 
-- **Prompt templates**: `.harness/commands/review.md` (or `.claude/commands/…`,
-  `~/.harness/commands/…`, `~/.claude/commands/…`) runs as `/review <args>`.
+- **Prompt templates**: `.hasp/commands/review.md` (or `.claude/commands/…`,
+  `~/.hasp/commands/…`, `~/.claude/commands/…`) runs as `/review <args>`.
   `$ARGUMENTS` and `$1`…`$9` are substituted; `description:` front matter
   shows in completion; `git/pr.md` becomes `/git:pr`. They work in every front
   end (TUI, REPL, `-p`, ACP, web) because the engine expands them.
-- **Skills**: `.harness/skills/<name>/SKILL.md` (or `.claude/skills/…`, and
+- **Skills**: `.hasp/skills/<name>/SKILL.md` (or `.claude/skills/…`, and
   the home-directory twins) with `name:` and `description:` front matter. Only
   names and descriptions are in context. The model loads a skill's body, and
   any supporting file in its directory, through the `skill` tool when a task
   calls for it.
-- **Hooks**: `~/.harness/hooks.json`, and `.harness/hooks.json` once you run
-  `harness trust` in the project (a cloned repo's hooks never run on their
+- **Hooks**: `~/.hasp/hooks.json`, and `.hasp/hooks.json` once you run
+  `hasp trust` in the project (a cloned repo's hooks never run on their
   own):
 
   ```json
@@ -121,14 +133,14 @@ Project beats home, `.harness` beats `.claude`:
   `post_tool` hook appends feedback to the result, and a `stop` hook sends the
   model back to fix what it found (up to 3 times per turn).
 
-`harness doctor` lists what it found.
+`hasp doctor` lists what it found.
 
 ## Environments
 
 Run an agent's tools in their own container, with limits you declare:
 
 ```toml
-# .harness/environments/py312.toml   (or ~/.harness/environments/)
+# .hasp/environments/py312.toml   (or ~/.hasp/environments/)
 image   = "python:3.12-slim"
 cpus    = 2
 memory  = "4G"
@@ -141,10 +153,10 @@ PYTHONDONTWRITEBYTECODE = "1"
 ```
 
 ```sh
-harness env build-guest          # once: the static Linux guest agent (≈30 s, via Docker)
-harness env check py312          # start it, print the limits the kernel enforces, stop it
-harness --env py312              # this session's tools run inside it (also HARNESS_ENV)
-harness env list | prune         # definitions · remove containers whose session died
+hasp env build-guest          # once: the static Linux guest agent (≈30 s, via Docker)
+hasp env check py312          # start it, print the limits the kernel enforces, stop it
+hasp --env py312              # this session's tools run inside it (also HASP_ENV)
+hasp env list | prune         # definitions · remove containers whose session died
 ```
 
 `runtime` picks the container runtime: the default (`runc`, a shared
@@ -163,33 +175,33 @@ child otherwise inherits its parent's environment, so a session running in an
 environment can't spawn its way out of it. A mutation child gets its own
 container with its own worktree mounted.
 
-How it works: the guest agent is this harness's own static build, run inside
-as `harness --mcp-serve`. The host's tools become proxies with the same
+How it works: the guest agent is this hasp's own static build, run inside
+as `hasp --mcp-serve`. The host's tools become proxies with the same
 names and schemas, so the model sees no difference. A proxy asks the host's
 approval gate before forwarding a call; the guest then enforces the usual
 structural rules. Calls run concurrently, and esc cancels a command inside the
 environment too. Backends sit behind one trait
-(`crates/harness-env/src/backend.rs`); Docker is the first, and microVMs
+(`crates/hasp-env/src/backend.rs`); Docker is the first, and microVMs
 (Firecracker, Apple Virtualization) are designed to be the next.
 
 ## Bring your own plan
 
 Two ways to run on a plan you already pay for.
 
-**Coding plans and other endpoints, on the harness's own engine.** Most
-coding plans ship an Anthropic-compatible endpoint; the harness speaks that
+**Coding plans and other endpoints, on the hasp's own engine.** Most
+coding plans ship an Anthropic-compatible endpoint; the hasp speaks that
 wire, so a plan is just a key:
 
 ```sh
-harness providers                  # built-ins, which have keys, default models
-harness login kimi                 # stored in ~/.harness/credentials.json (0600)
-harness --provider kimi            # or KIMI_API_KEY in the environment
+hasp providers                  # built-ins, which have keys, default models
+hasp login kimi                 # stored in ~/.hasp/credentials.json (0600)
+hasp --provider kimi            # or KIMI_API_KEY in the environment
 ```
 
 Built in: `zai` (GLM coding plan), `kimi` (Kimi Code), `minimax` /
 `minimax-cn`, `qwen` (Alibaba Model Studio coding plan — Qwen, GLM, Kimi,
 MiniMax), `moonshot`, `deepseek`. Anything else Anthropic-compatible (a
-company gateway, OpenRouter, a new plan) goes in `~/.harness/providers.json`:
+company gateway, OpenRouter, a new plan) goes in `~/.hasp/providers.json`:
 
 ```json
 { "providers": { "gateway": { "base_url": "https://llm.example.com/anthropic",
@@ -197,16 +209,16 @@ company gateway, OpenRouter, a new plan) goes in `~/.harness/providers.json`:
 ```
 
 **Subscriptions, through their own CLI.** A Claude Pro/Max or ChatGPT plan
-can only be used by its vendor's own client, so the harness drives that
+can only be used by its vendor's own client, so the hasp drives that
 client — the one you already installed and logged into — and puts its own
 layer on top: the TUI, approvals in the prompt line, `/review` and
-`harness review`, worktrees.
+`hasp review`, worktrees.
 
 ```sh
-harness agents                         # which agents are installed
-harness --agent claude                 # Claude Code, on your Claude plan
-harness --agent codex --model gpt-5.5  # Codex, on your ChatGPT plan
-harness --agent opencode -p "fix the failing test"
+hasp agents                         # which agents are installed
+hasp --agent claude                 # Claude Code, on your Claude plan
+hasp --agent codex --model gpt-5.5  # Codex, on your ChatGPT plan
+hasp --agent opencode -p "fix the failing test"
 ```
 
 | agent | protocol | plan |
@@ -215,11 +227,11 @@ harness --agent opencode -p "fix the failing test"
 | `codex` | `codex app-server` (JSON-RPC) | ChatGPT Plus / Pro |
 | `gemini`, `opencode` | ACP (Agent Client Protocol) | Google account; OpenCode's providers |
 
-Any other ACP agent is one entry in `~/.harness/agents.json`
+Any other ACP agent is one entry in `~/.hasp/agents.json`
 (`{"agents": {"name": {"command": "…", "args": ["…"]}}}`). Each agent's
 session continues across runs in the same workspace (`--new` starts fresh);
 `--yolo` lifts its approval prompts, and its own sandbox still applies. The
-agent runs its own tools, so the harness's tool-level guarantees (path
+agent runs its own tools, so the hasp's tool-level guarantees (path
 confinement, the bash rule) are the agent's to keep in this mode; reviews
 still see everything it changed.
 
@@ -229,11 +241,11 @@ Review what an agent did the way you review a colleague's change — in your
 editor, over rounds — without leaving the terminal.
 
 ```sh
-harness review new "add retries"    # snapshot the workspace, open the diff in $EDITOR
-harness review send                 # hand your comments to the agent (continues its session)
-harness review edit                 # next round: only what changed since your last look
-harness review approve --land       # commit exactly the snapshot you approved
-harness review                      # list: needs review · changes requested · approved · landed
+hasp review new "add retries"    # snapshot the workspace, open the diff in $EDITOR
+hasp review send                 # hand your comments to the agent (continues its session)
+hasp review edit                 # next round: only what changed since your last look
+hasp review approve --land       # commit exactly the snapshot you approved
+hasp review                      # list: needs review · changes requested · approved · landed
 ```
 
 In the TUI, `/review` does the same for the session's workspace or worktree;
@@ -252,27 +264,27 @@ agent edits the file — and changing `open` to `resolved` closes them. Set
   approval; a workspace lands as a commit of the approved tree, a child
   worktree (`--worktree NAME`, or `/review` inside it) as a merge of the
   approved snapshot, including work the agent never committed.
-- **State** is an append-only log per review in `.harness/reviews/`;
-  snapshots are kept alive by refs under `refs/harness/reviews/`.
+- **State** is an append-only log per review in `.hasp/reviews/`;
+  snapshots are kept alive by refs under `refs/hasp/reviews/`.
 
 ### Diffs
 
 Diffs everywhere (the review document, `write`/`edit` tool results) come from
-`harness-diff`: interned lines, histogram diff for readable hunks, and git's
+`hasp-diff`: interned lines, histogram diff for readable hunks, and git's
 indent heuristic. Histogram's cost grows with file length × number of separate
 changes, so it runs only within a budget (~50 ms of work); past it the diff is
 Myers, which stays near-linear. A 200,000-line file with 20,000 scattered
 edits diffs in milliseconds instead of four seconds; nothing is ever
 "too large to diff". Profile with
-`cargo run --release -p harness-diff --example profile`.
+`cargo run --release -p hasp-diff --example profile`.
 
 ## Sandbox
 
-`HARNESS_SANDBOX=workspace-write` runs every `bash` command under the OS
+`HASP_SANDBOX=workspace-write` runs every `bash` command under the OS
 sandbox (`sandbox-exec` on macOS, `bwrap` on Linux), so it can write only to
-the workspace, the temp directories and `HARNESS_SANDBOX_WRITABLE`
+the workspace, the temp directories and `HASP_SANDBOX_WRITABLE`
 (colon-separated). `read-only` allows temp writes only, and
-`HARNESS_SANDBOX_NETWORK=deny` also cuts the network. If the platform tool is
+`HASP_SANDBOX_NETWORK=deny` also cuts the network. If the platform tool is
 missing, commands are refused with a message rather than run unsandboxed.
 Approvals still apply on top. The sandbox limits what an approved command can
 do, and it is what makes a long `--yolo` run reasonable.
@@ -281,7 +293,7 @@ do, and it is what makes a long `--yolo` run reasonable.
 
 The model can spawn child agents with the `spawn` tool. Children get base tools
 only (read/write/edit/bash, plus the read-only `web_fetch` and `symbol_search`) — one level deep, by construction — and a child that
-declares `mutation: true` runs in its own git worktree (`harness/<name>`).
+declares `mutation: true` runs in its own git worktree (`hasp/<name>`).
 Children never block the parent: exits arrive as notices between tool calls, and
 `message` supports follow-ups with `delivered`/`queued` receipts.
 
@@ -289,24 +301,24 @@ A child that declared `mutation: true` leaves its worktree and branch behind so
 you can inspect the work. To clean up:
 
 ```sh
-harness worktrees                      # name, branch, and whether it is merged
-harness worktrees prune <name>         # refuses unmerged work; --force overrides
+hasp worktrees                      # name, branch, and whether it is merged
+hasp worktrees prune <name>         # refuses unmerged work; --force overrides
 ```
 
 The branch always survives a prune, so a forced cleanup is still recoverable with
-`git branch -D harness/<name>` once you are sure.
+`git branch -D hasp/<name>` once you are sure.
 
 ## Editors and browsers
 
 Two more front ends speak to the same daemon, so neither reimplements anything:
 
-- **`harness --acp`** — Agent Client Protocol on stdio, for editors. `session/new`,
+- **`hasp --acp`** — Agent Client Protocol on stdio, for editors. `session/new`,
   `session/load` (replays the journal), `session/prompt` (streaming
   `agent_message_chunk` / `agent_thought_chunk` / `tool_call`), `session/cancel`,
   and gate questions arrive as `session/request_permission` — an editor's refusal
   is what the tool sees. Client-provided `fs/*` and `terminal/*` capabilities are
-  unused; the harness's own confined tools do that work.
-- **`harness app`** / **`harness web [port]`** — the desktop app. `app` opens it
+  unused; the hasp's own confined tools do that work.
+- **`hasp app`** / **`hasp web [port]`** — the desktop app. `app` opens it
   in its own window (a Chromium-family browser's app mode, else the default
   browser); `web` serves it and prints the URL.
   - **Sidebar:** every project and session on the machine, newest first, with a
@@ -330,7 +342,7 @@ Two more front ends speak to the same daemon, so neither reimplements anything:
 Add tools from any MCP server (stdio). Project file wins over user file:
 
 ```json
-// .harness/mcp.json  (or ~/.harness/mcp.json)
+// .hasp/mcp.json  (or ~/.hasp/mcp.json)
 {"servers": {"git": {"command": "uvx", "args": ["mcp-server-git"],
                     "env": {"GIT_DIR": "."}}}}
 ```
@@ -339,31 +351,31 @@ Remote tools appear to the model as `mcp__<server>__<tool>` with their schemas
 unchanged, so the tool list stays cache-stable. A server that fails to start is
 reported and skipped — it never blocks startup.
 
-The harness can also *be* a server, so other agents can use its tools:
+The hasp can also *be* a server, so other agents can use its tools:
 
 ```sh
-harness --mcp-serve     # MCP over stdio, tools: read, write, edit, bash
+hasp --mcp-serve     # MCP over stdio, tools: read, write, edit, bash
 ```
 
 That serves the same tool layer, so workspace confinement (relative paths only,
 no `..`, symlink checks) and the bash metacharacter rule still apply. Because
 there is no human attached to approve anything, writes and non-allowlisted
-commands are refused unless you set `HARNESS_MCP_YOLO=1`. Point a client at it
-with `{"servers": {"harness": {"command": "…/harness", "args": ["--mcp-serve"],
+commands are refused unless you set `HASP_MCP_YOLO=1`. Point a client at it
+with `{"servers": {"hasp": {"command": "…/hasp", "args": ["--mcp-serve"],
 "cwd": "/path/to/project"}}}`.
 
 ## Where state lives
 
-- `~/.harness/sessions/<workspace-key>/*.jsonl` — append-only session trees
+- `~/.hasp/sessions/<workspace-key>/*.jsonl` — append-only session trees
   (messages, compactions, goals, heartbeats, model changes), written, never
   mutated. `record` entries are the canonical state; restarting resumes the tail.
-- `~/.harness/credentials.json` — API keys, mode 0600.
-- `<project>/.harness/artifacts/<run>/` — truncated tool output that the model can
+- `~/.hasp/credentials.json` — API keys, mode 0600.
+- `<project>/.hasp/artifacts/<run>/` — truncated tool output that the model can
   page back in with `read`.
-- `<project>/.harness/traces/*.jsonl` — per-turn API and tool timings.
+- `<project>/.hasp/traces/*.jsonl` — per-turn API and tool timings.
 
-Sessions are portable by construction: `harness export [id] > file.jsonl` writes
-the journal as-is and `harness import file.jsonl` validates it and files it under
+Sessions are portable by construction: `hasp export [id] > file.jsonl` writes
+the journal as-is and `hasp import file.jsonl` validates it and files it under
 the workspace its header names, so history resumes wherever it lands.
 
 ## Daemon
@@ -375,7 +387,7 @@ while nobody is attached is dropped rather than lost — the journal is canonica
 so the next client to attach sees all of it. Starting the TUI in that workspace
 rejoins the running session, and a second client joins the same one rather than
 being refused. `session/new` is refused while a live session holds the
-workspace (use `harness shutdown` to end it), because quietly evicting a session
+workspace (use `hasp shutdown` to end it), because quietly evicting a session
 that may be mid-goal would be worse. Approval questions with no client attached
 are denied immediately instead of waiting for a client that is gone.
 
@@ -388,25 +400,25 @@ would swap the session under a running turn (`/branch <id>`, `/worktree`,
 message rather than queued. Cancel first.
 
 `--no-daemon` runs everything embedded, `--serve` runs the daemon in the
-foreground. Transport is newline-delimited JSON-RPC 2.0 over `$HARNESS_SOCKET`
-or `~/.harness/daemon.sock`.
+foreground. Transport is newline-delimited JSON-RPC 2.0 over `$HASP_SOCKET`
+or `~/.hasp/daemon.sock`.
 
 ## Environment
 
-`HARNESS_EFFORT` (`low`…`max`; Claude models default to `xhigh` where
-supported), `HARNESS_THINKING=off`, `HARNESS_SANDBOX*` (above),
+`HASP_EFFORT` (`low`…`max`; Claude models default to `xhigh` where
+supported), `HASP_THINKING=off`, `HASP_SANDBOX*` (above),
 `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL`, `ZAI_API_KEY`, `DEEPSEEK_API_KEY`,
-`HARNESS_PROVIDER` (`anthropic` | `zai` | `deepseek` | `ollama` | `compat` |
-`mock`), `HARNESS_SOCKET`, `HARNESS_MOCK_DELAY_MS`, `HARNESS_THEME`
+`HASP_PROVIDER` (`anthropic` | `zai` | `deepseek` | `ollama` | `compat` |
+`mock`), `HASP_SOCKET`, `HASP_MOCK_DELAY_MS`, `HASP_THEME`
 (`dark` | `light`).
 
 **Any other model or vendor, with no code change**: `--provider compat` speaks
-the OpenAI wire format to whatever `HARNESS_COMPAT_URL` points at (plus optional
-`HARNESS_COMPAT_KEY`) — Ollama and vLLM/LM Studio locally, OpenRouter/Groq and
+the OpenAI wire format to whatever `HASP_COMPAT_URL` points at (plus optional
+`HASP_COMPAT_KEY`) — Ollama and vLLM/LM Studio locally, OpenRouter/Groq and
 most new vendors remotely. `--provider ollama` defaults to
-`http://127.0.0.1:11434/v1` (`HARNESS_OLLAMA_URL` overrides; windows via
-`HARNESS_OLLAMA_WINDOW`/`HARNESS_COMPAT_WINDOW`). Model lists are discovered
-from the endpoint — `harness models ollama` shows what `ollama pull` gave you —
+`http://127.0.0.1:11434/v1` (`HASP_OLLAMA_URL` overrides; windows via
+`HASP_OLLAMA_WINDOW`/`HASP_COMPAT_WINDOW`). Model lists are discovered
+from the endpoint — `hasp models ollama` shows what `ollama pull` gave you —
 and `--model` accepts any id they serve. Without `--model`, the first served
 model is used.
 
@@ -427,7 +439,7 @@ cheaper.
 `cargo clippy --workspace --all-targets -- -D warnings`, which
 `.github/workflows/ci.yml` runs on macOS and Linux. Tagging `vX.Y.Z` builds
 binaries for both macOS architectures and Linux via `release.yml`, and
-`install.sh` installs a published release (`HARNESS_REPO=owner/name sh
+`install.sh` installs a published release (`HASP_REPO=owner/name sh
 install.sh`) — both are inert until the repo has a remote, which is why the
 installer says so instead of failing obscurely.
 

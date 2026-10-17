@@ -4,7 +4,7 @@ Status: COMPLETE (2026-09-20) — results in docs/benchmarks.md
 
 Headline: harness overhead is 39 ms per one-shot turn (mock provider, network
 excluded) and unmeasurable against provider variance; the full 164-problem
-HumanEval suite through `harness -p` on deepseek-v4-pro scored **95.7% pass@1**
+HumanEval suite through `hasp -p` on deepseek-v4-pro scored **95.7% pass@1**
 for **$0.78**, p50 latency 6.1 s per problem.
 
 ## Two questions
@@ -13,7 +13,7 @@ for **$0.78**, p50 latency 6.1 s per problem.
    round trips, journal load and replay, compaction, MCP bridge latency —
    measured with the mock provider so the network is out of the picture.
 2. **How does the whole system score on a public benchmark?** HumanEval (164
-   problems, OpenAI, MIT) run through `harness -p` against DeepSeek, evaluated
+   problems, OpenAI, MIT) run through `hasp -p` against DeepSeek, evaluated
    locally against the canonical tests — plus a direct-to-API baseline on a
    subset so the harness's marginal cost (latency and tokens) is visible.
 
@@ -28,7 +28,7 @@ use.
 
 ## Method
 
-- Micro: `target/release/harness`, mock provider, 20-50 repetitions, medians.
+- Micro: `target/release/hasp`, mock provider, 20-50 repetitions, medians.
   Machine and rustc recorded in the results file.
 - HumanEval: fresh temp workspace per problem (no `AGENTS.md`, so the system
   prompt is identical everywhere), `--new`, one-shot, 6 workers, 150 s per
