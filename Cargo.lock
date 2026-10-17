@@ -2985,6 +2985,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "hasp-gateway"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "futures-util",
+ "hasp-edge",
+ "hasp-recall",
+ "hasp-wire",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "hasp-mcp"
 version = "0.1.0"
 dependencies = [

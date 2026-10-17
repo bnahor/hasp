@@ -4,6 +4,7 @@ members = [
     "crates/hasp-bus",
     "crates/hasp-recall",
     "crates/hasp-edge",
+    "crates/hasp-gateway",
     "crates/hasp-cli",
     "crates/hasp-config",
     "crates/hasp-desktop",
