@@ -1,0 +1,20 @@
+[package]
+name = "hasp-edge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Runs Threadline tasks on a home node: claims (lease + fencing), hands the
+# run to Dagu through the mesh hub, and executes it with hasp inside the job.
+[[bin]]
+name = "hasp-edge"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+hasp-core = { workspace = true }
+hasp-workspace = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }

@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/hasp-bus",
     "crates/hasp-recall",
+    "crates/hasp-edge",
     "crates/hasp-cli",
     "crates/hasp-config",
     "crates/hasp-desktop",
