@@ -45,6 +45,23 @@ impl Hub {
         Err(anyhow!("hub {status}: {}", v["detail"]))
     }
 
+    /// Dagu's status for our run of (task, fencing): `queued`, `running`,
+    /// `succeeded`, `failed`, `aborted` … plus the engine error if any.
+    pub async fn status(&self, task_id: &str, fencing: u64) -> Result<(String, String)> {
+        let r = self
+            .http
+            .post(format!("{}/api/edge/status", self.base))
+            .bearer_auth(&self.token)
+            .json(&json!({"task_id": task_id, "fencing_token": fencing}))
+            .send()
+            .await?;
+        if !r.status().is_success() {
+            return Err(anyhow!("hub status {}", r.status()));
+        }
+        let v: Value = r.json().await?;
+        Ok((v["status"].as_str().unwrap_or("").into(), v["error"].as_str().unwrap_or("").into()))
+    }
+
     pub async fn stop(&self, task_id: &str, fencing: u64) -> Result<()> {
         let r = self
             .http

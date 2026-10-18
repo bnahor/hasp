@@ -118,6 +118,20 @@ pub async fn tick(cfg: &Config, tl: &Threadline, hub: &Hub) -> Result<Vec<String
                 Err(e) => log.push(format!("{task_id}: renew failed: {e}")),
             }
         }
+        // A run that ended without completing the task (crashed, misconfigured,
+        // killed) would otherwise leave us renewing the lease forever: report it
+        // as blocked, with the reason, for a person to decide. Not retried.
+        if h.submitted.is_some()
+            && matches!(status, "claimed" | "in_progress")
+            && let Ok((run, err)) = hub.status(&task_id, h.grant.fencing_token).await
+            && matches!(run.as_str(), "failed" | "aborted" | "rejected" | "succeeded")
+        {
+            let why = if err.is_empty() { format!("the {run} run didn't complete the task") } else { format!("run {run}: {err}") };
+            let _ = tl.update(&h.grant, "blocked", &why.chars().take(500).collect::<String>(), None).await;
+            log.push(format!("{task_id}: blocked ({why})"));
+            held.tasks.remove(&task_id);
+            continue;
+        }
         if h.submitted.is_none() {
             match hub.submit(&task_id, &h.grant.lease_id, h.grant.fencing_token, &client_id).await {
                 Ok(Submit::Queued { name, run_id, .. }) => {

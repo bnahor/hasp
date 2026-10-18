@@ -33,8 +33,24 @@ fn mesh_config() -> std::collections::HashMap<String, String> {
     m
 }
 
+/// Dagu runs `hasp-edge exec` in the worker's login shell, not with the edge
+/// worker's environment, so every setting has a default that matches the
+/// staged install (edge/staging/install.sh).
+fn default_token_file() -> Option<String> {
+    let p = PathBuf::from(std::env::var("HOME").ok()?).join(".threadline/threadlined/home.daemon-token");
+    p.exists().then(|| p.to_string_lossy().into_owned())
+}
+
+fn default_hasp() -> String {
+    let local = PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/bin/hasp");
+    if local.exists() { local.to_string_lossy().into_owned() } else { "hasp".into() }
+}
+
 fn threadline() -> Result<Threadline> {
-    let file = std::env::var("THREADLINED_TOKEN_FILE").context("THREADLINED_TOKEN_FILE (threadlined's <swarm>.daemon-token)")?;
+    let file = std::env::var("THREADLINED_TOKEN_FILE")
+        .ok()
+        .or_else(default_token_file)
+        .context("THREADLINED_TOKEN_FILE (threadlined's <swarm>.daemon-token)")?;
     let token = std::fs::read_to_string(&file).with_context(|| format!("reading {file}"))?;
     Ok(Threadline::new(&env("THREADLINED_URL", "http://127.0.0.1:8788"), token.trim()))
 }
@@ -46,7 +62,7 @@ fn arg(args: &[String], flag: &str) -> Option<String> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let node = env("HASP_EDGE_NODE", "");
+    let node = std::env::var("HASP_EDGE_NODE").ok().or_else(|| mesh_config().get("MESH_NODE").cloned()).unwrap_or_default();
     let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
     match args.first().map(String::as_str) {
         Some("worker") => {
@@ -87,7 +103,7 @@ async fn main() -> Result<()> {
             let a = exec::ExecArgs {
                 node,
                 grant,
-                hasp: PathBuf::from(env("HASP_EDGE_HASP", "hasp")),
+                hasp: PathBuf::from(std::env::var("HASP_EDGE_HASP").unwrap_or_else(|_| default_hasp())),
                 work_root: std::env::var("HASP_EDGE_WORK").map(PathBuf::from).unwrap_or_else(|_| home.join("edge-work")),
                 hasp_args: env("HASP_EDGE_HASP_ARGS", "").split_whitespace().map(String::from).collect(),
             };
