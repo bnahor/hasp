@@ -3,7 +3,7 @@
 //!   HASP_EDGE_CAPS           comma list (gpu,linux | xcode,macos ...)
 //!   THREADLINED_URL          local threadlined (default http://127.0.0.1:8788)
 //!   THREADLINED_TOKEN_FILE   its daemon token file (<data>/<swarm>.daemon-token)
-//!   MESH_URL / MESH_TOKEN    hub + this node's own node token (~/.config/mesh/config)
+//!   MESH_URL / MESH_AGENT_TOKEN  hub + this node's own node token (~/.config/mesh/config)
 //!   HASP_EDGE_HASP           hasp binary (default: `hasp` on PATH)
 //!   HASP_EDGE_WORK           where task workspaces live (default ~/edge-work)
 //!   HASP_EDGE_HASP_ARGS      extra args for hasp (space separated, e.g. "--provider mock")
@@ -51,7 +51,10 @@ async fn main() -> Result<()> {
     match args.first().map(String::as_str) {
         Some("worker") => {
             let mesh = mesh_config();
-            let hub = Hub::new(mesh.get("MESH_URL").context("MESH_URL")?, mesh.get("MESH_TOKEN").map(String::as_str).unwrap_or(""));
+            // The hub's edge API takes this node's own credential (MESH_AGENT_TOKEN from
+            // `mesh enroll --kind node`), not a person's MESH_TOKEN.
+            let token = mesh.get("MESH_AGENT_TOKEN").or_else(|| mesh.get("MESH_TOKEN")).map(String::as_str).unwrap_or("");
+            let hub = Hub::new(mesh.get("MESH_URL").context("MESH_URL")?, token);
             let cfg = worker::Config {
                 node: node.clone(),
                 caps: env("HASP_EDGE_CAPS", "").split(',').filter(|s| !s.is_empty()).map(String::from).collect(),
